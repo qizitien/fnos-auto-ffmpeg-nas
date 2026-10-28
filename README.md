@@ -1,4 +1,4 @@
-# fpkconverter（飞牛 fnOS 视频转码）
+# 飞牛 fnOS 视频转码
 
 飞牛 NAS 上的本地视频自动转码/压缩工具。基于 Flask + ffmpeg，支持 Intel QSV 硬件加速，深色影音风界面。
 
