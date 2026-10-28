@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 运行时数据
+app/fpkconverter/packages/
+app/fpkconverter/boot.log
+app/fpkconverter/*.db
+app/fpkconverter/*.log
+
+# 打包产物
+*.fpk
+app.tgz
+repack.py
+
+# 临时/系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,2 @@
+# 所有依赖已打包在 venv/ 中
+# flask + watchdog + 所有传递依赖
