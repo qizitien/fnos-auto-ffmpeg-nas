@@ -1,4 +1,4 @@
-# fnos-auto-ffmpeg-nas
+# 飞牛nas 视频自动压缩工具
 
 飞牛 fnOS 上的本地视频自动转码/压缩工具。Flask + ffmpeg，Intel QSV 硬件加速，深色影音风界面。
 
