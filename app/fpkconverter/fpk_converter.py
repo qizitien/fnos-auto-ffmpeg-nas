@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.61'
+VERSION = '1.0.62'
 
 
 class Database:
@@ -319,6 +319,11 @@ class VideoConverter:
         self.custom_resize = ''
         # FPS 策略：keep(保持原帧率) / 30 / 60
         self.fps_mode = 'keep'
+        # 输出策略：overwrite(覆盖原文件) / custom_dir(输出到自定义目录，保留目录结构)
+        self.output_mode = 'overwrite'
+        self.output_dir = ''
+        # 监控根目录列表（用于 custom_dir 模式计算相对路径）
+        self.monitor_dirs = []
 
     # 分辨率预设 → 目标高度（等比缩放，宽度自动按 2 对齐）
     RESIZE_PRESETS = {
@@ -921,6 +926,42 @@ class VideoConverter:
             s = s.rstrip(',')
         return s, ''
 
+    def _resolve_custom_output(self, input_path):
+        """custom_dir 模式：在 output_dir 下重建原文件的目录结构。
+        例如监控目录 /volume1/视频，文件 /volume1/视频/剧/a.mp4，
+        输出到 /volume2/output/剧/a.mp4（容器后缀按当前 self.container 替换）。
+        找不到匹配的监控根时，回退到 output_dir 下平铺文件名。"""
+        try:
+            out_root = Path(self.output_dir).expanduser().resolve()
+        except Exception:
+            return None
+        if not str(out_root).strip() or not out_root.is_dir():
+            return None
+        try:
+            inp = Path(input_path).resolve()
+        except Exception:
+            return None
+        # 找最长匹配的监控根
+        best_root = None
+        for md in (self.monitor_dirs or []):
+            try:
+                mp = Path(md).expanduser().resolve()
+                if inp == mp or str(inp).startswith(str(mp) + os.sep):
+                    if best_root is None or len(str(mp)) > len(str(best_root)):
+                        best_root = mp
+            except Exception:
+                continue
+        if best_root is not None:
+            try:
+                rel = inp.relative_to(best_root)
+                # rel 是相对路径（含子目录和文件名）；替换后缀为目标容器
+                target = out_root / rel.parent / f"{inp.stem}.{self.container}"
+                return target
+            except Exception:
+                pass
+        # 回退：平铺
+        return out_root / f"{inp.stem}.{self.container}"
+
     def _build_ffmpeg_cmd(self, input_path, output_path, target_codec, target_width, target_height, needs_resize,
                           preset_override=None, progress=False, qsv_device=None, color_info=None):
         is_qsv = target_codec.endswith('_qsv')
@@ -1257,6 +1298,39 @@ class VideoConverter:
         saved_size = original_size - converted_size
         if converted_size < original_size:
             print(f"转码后更小，节省 {saved_size / (1024*1024):.2f} MB")
+            # 根据输出策略决定最终位置
+            custom_out = None
+            if self.output_mode == 'custom_dir':
+                custom_out = self._resolve_custom_output(input_path)
+                if custom_out is None:
+                    print(f"自定义输出目录无效，回退到覆盖原文件模式")
+            if custom_out is not None:
+                # custom_dir 模式：保留目录结构，不删原文件
+                try:
+                    custom_out.parent.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    print(f"创建输出目录失败: {e}")
+                    self._last_failure_reason = f"创建输出目录失败: {e}"
+                    if output_path.exists():
+                        try: output_path.unlink()
+                        except: pass
+                    return False, 0
+                if custom_out.exists():
+                    try: custom_out.unlink()
+                    except: pass
+                try:
+                    shutil.move(str(output_path), str(custom_out))
+                except Exception as e:
+                    print(f"移动到自定义输出失败: {e}")
+                    self._last_failure_reason = f"移动输出文件失败: {e}"
+                    if output_path.exists():
+                        try: output_path.unlink()
+                        except: pass
+                    return False, 0
+                print(f"已输出到: {custom_out}（原文件保留）")
+                self.db.add_processed_file(str(custom_out), original_size, True, saved_size)
+                return True, saved_size
+            # overwrite 模式：覆盖原文件
             final_output_path = input_path.parent / f"{input_path.stem}.{self.container}"
             backup_path = None
             original_stem = input_path.stem
