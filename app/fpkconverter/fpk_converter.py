@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.60'
+VERSION = '1.0.61'
 
 
 class Database:
@@ -313,10 +313,22 @@ class VideoConverter:
         self.failure_lock = threading.Lock()
         self._qsv_disabled = False
         self._last_failure_reason = '转码失败'
-        # 分辨率策略：keep(保持原分辨率) / 1080p(默认,兼容旧行为) / custom(自定义 ffmpeg -vf 滤镜)
+        # 分辨率策略：keep / 4k / 2k / 1080p / 540p / 480p / 360p / custom
         self.resize_mode = '1080p'
         # custom 模式下用户填写的 ffmpeg 滤镜参数（仅允许安全白名单，防命令注入）
         self.custom_resize = ''
+        # FPS 策略：keep(保持原帧率) / 30 / 60
+        self.fps_mode = 'keep'
+
+    # 分辨率预设 → 目标高度（等比缩放，宽度自动按 2 对齐）
+    RESIZE_PRESETS = {
+        '4k':    2160,
+        '2k':    1440,
+        '1080p': 1080,
+        '540p':  540,
+        '480p':  480,
+        '360p':  360,
+    }
 
     def _now(self):
         return time.time()
@@ -930,15 +942,22 @@ class VideoConverter:
             cmd.extend(['-bufsize', f'{self.MAX_BITRATE * 2}'])
         cmd.extend(['-threads', str(self.threads)])
 
+        # 构建 -vf 滤镜链：scale（如有）+ fps（如固定帧率）
+        vf_parts = []
         if needs_resize:
             if hasattr(self, 'resize_mode') and self.resize_mode == 'custom' and self.custom_resize:
-                # custom 已由 _validate_custom_resize 校验，直接作为 scale 目标
                 if self.custom_resize.startswith('scale='):
-                    cmd.extend(['-vf', self.custom_resize])
+                    vf_parts.append(self.custom_resize[len('scale='):])
                 else:
-                    cmd.extend(['-vf', f'scale={self.custom_resize}'])
+                    vf_parts.append(self.custom_resize)
             else:
-                cmd.extend(['-vf', f'scale={target_width}:{target_height}'])
+                vf_parts.append(f'scale={target_width}:{target_height}')
+        # FPS 控制：keep 不处理；30/60 追加 fps= 滤镜
+        fps_mode = getattr(self, 'fps_mode', 'keep') or 'keep'
+        if fps_mode in ('30', '60'):
+            vf_parts.append(f'fps={fps_mode}')
+        if vf_parts:
+            cmd.extend(['-vf', ','.join(vf_parts)])
 
         color_info = color_info or {}
         color_arg_map = (
@@ -1079,25 +1098,25 @@ class VideoConverter:
         resize_mode = getattr(self, 'resize_mode', '1080p') or '1080p'
 
         if resize_mode == 'keep':
-            # 保持原分辨率，不缩放
             needs_resize = False
         elif resize_mode == 'custom':
-            # 自定义：校验后使用用户填写的参数作为缩放目标
             custom, verr = self._validate_custom_resize(self.custom_resize)
             if verr:
                 print(f"自定义分辨率参数无效，按原分辨率处理: {verr}")
                 needs_resize = False
             elif custom:
-                self.custom_resize = custom  # 归一化后的值
+                self.custom_resize = custom
                 needs_resize = True
-        elif resize_mode == '1080p' and height > 1080:
-            target_height = 1080
-            target_width = int(width * 1080 / height)
-            target_width = target_width - (target_width % 2)
-            if target_width < 2:
-                target_width = 2
-            needs_resize = True
-            print(f"缩放分辨率: {width}x{height} -> {target_width}x{target_height}")
+        elif resize_mode in self.RESIZE_PRESETS:
+            target_h = self.RESIZE_PRESETS[resize_mode]
+            if height > target_h:
+                target_height = target_h
+                target_width = int(width * target_h / height)
+                target_width = target_width - (target_width % 2)
+                if target_width < 2:
+                    target_width = 2
+                needs_resize = True
+                print(f"缩放分辨率: {width}x{height} -> {target_width}x{target_height} ({resize_mode})")
         
         if self.use_gpu:
             print(self._gpu_diagnostic_message())
