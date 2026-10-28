@@ -624,26 +624,24 @@ def api_stop():
 
 @app.route('/api/logs')
 def api_logs():
-    # 统计(全量聚合)与明细列表(仅最近100条)分离：
-    # 修复此前"统计只算最近100条"导致的不准确显示。
-    stats = {'total_count': 0, 'success_count': 0, 'total_saved_mb': 0.0, 'total_processed_mb': 0.0}
+    """转码记录列表 + 累计统计。
+    统计数字来自 stats_cumulative 表（删记录不影响累计）；明细按 ?limit=N 查询。"""
+    limit = request.args.get('limit', 100, type=int)
+    limit = max(1, min(limit or 100, 500))
+    stats = {'total_count': 0, 'success_count': 0, 'total_saved_mb': 0.0}
     rows = []
     try:
         db = sqlite3.connect(DB_PATH, timeout=5)
         try:
-            agg = db.execute(
-                'SELECT COUNT(*), '
-                '       COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0), '
-                '       COALESCE(SUM(saved_size), 0), '
-                '       COALESCE(SUM(file_size), 0) '
-                'FROM processed_files'
-            ).fetchone()
-            if agg:
-                stats['total_count'] = int(agg[0] or 0)
-                stats['success_count'] = int(agg[1] or 0)
-                stats['total_saved_mb'] = round((agg[2] or 0) / 1048576, 2)
-                stats['total_processed_mb'] = round((agg[3] or 0) / 1048576, 2)
-            rows = db.execute('SELECT * FROM processed_files ORDER BY processed_at DESC LIMIT 100').fetchall()
+            # 累计统计（独立于 processed_files，删记录不清零）
+            cursor = db.execute('SELECT key, value FROM stats_cumulative')
+            cum = {r[0]: int(r[1] or 0) for r in cursor.fetchall()}
+            stats['total_count'] = cum.get('total_success_count', 0)
+            stats['success_count'] = cum.get('total_success_count', 0)
+            stats['total_saved_mb'] = round(cum.get('total_saved_bytes', 0) / 1048576, 2)
+            rows = db.execute(
+                'SELECT * FROM processed_files ORDER BY processed_at DESC LIMIT ?', (limit,)
+            ).fetchall()
         finally:
             db.close()
     except: pass
@@ -656,8 +654,21 @@ def api_logs():
     return jsonify({'logs':logs,
                     'total_saved_mb':stats['total_saved_mb'],
                     'total_count':stats['total_count'],
-                    'success_count':stats['success_count'],
-                    'total_processed_mb':stats['total_processed_mb']})
+                    'success_count':stats['success_count']})
+
+@app.route('/api/logs/reset', methods=['POST'])
+def api_logs_reset():
+    """清空所有转码记录，但保留累计节省空间统计。"""
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        try:
+            cur = db.execute('DELETE FROM processed_files')
+            db.commit()
+            return jsonify({'success': True, 'deleted_count': cur.rowcount})
+        finally:
+            db.close()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'数据库错误: {e}'}), 500
 
 @app.route('/api/logs/batch_delete', methods=['POST'])
 def api_logs_batch_delete():
@@ -1017,14 +1028,22 @@ input[type=checkbox]{width:auto}
 <div class="card">
 <h3>转码记录
 <div class="row">
+<select id="log_limit" style="width:auto;padding:4px 8px;font-size:11px" onchange="refresh()">
+<option value="20">20 条</option>
+<option value="50">50 条</option>
+<option value="100" selected>100 条</option>
+<option value="200">200 条</option>
+</select>
+<button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="toggleLogs()">折叠/展开</button>
 <button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="refresh()">刷新</button>
 <button class="btn b-err" style="padding:5px 12px;font-size:11px" onclick="batchDeleteLogs()">批量删除选中</button>
+<button class="btn b-acc" style="padding:5px 12px;font-size:11px" onclick="resetLogs()">重置（清空记录，保留统计）</button>
 </div></h3>
-<div class="tc"><table><thead><tr>
+<div id="log_body" class="tc"><table><thead><tr>
 <th style="width:32px"><input type="checkbox" id="log_select_all" onclick="toggleAllLogs(this)" title="全选/反选"></th>
 <th>文件</th><th>原大小(MB)</th><th>节省(MB)</th><th>状态</th><th>时间</th>
 </tr></thead><tbody id="tb"></tbody></table></div>
-<div class="info" style="margin-top:8px">批量删除仅清除转码记录，不删除磁盘上的视频文件。</div>
+<div class="info" style="margin-top:8px">批量删除仅清除选中记录；"重置"清空全部记录但保留累计节省空间统计（不删除磁盘视频文件）。</div>
 </div>
 </div>
 
@@ -1090,7 +1109,9 @@ function removeDir(i){monitorDirs.splice(i,1);renderDirs();saveCfg()}
 function renderDirs(){let L=el('dirs_list');L.innerHTML='';if(!monitorDirs.length){L.innerHTML='<div class="info" style="margin-bottom:6px">尚未添加任何监控目录</div>';return}monitorDirs.forEach((d,i)=>{let w=document.createElement('div');w.className='dir_item';let sp=document.createElement('span');sp.textContent=d;let rm=document.createElement('button');rm.textContent='删除';rm.className='btn b-err';rm.style.cssText='padding:3px 10px;font-size:11px;flex-shrink:0';rm.onclick=()=>removeDir(i);w.appendChild(sp);w.appendChild(rm);L.appendChild(w)})}
 function toggleResizeCustom(){el('custom_resize_wrap').style.display=(el('resize_mode').value==='custom')?'block':'none'}
 function saveCfg(){let d={monitor_dirs:monitorDirs,crf:parseInt(el('crf').value),preset:el('preset').value,threads:parseInt(el('threads').value),codec:el('codec').value,container:el('container').value,use_gpu:el('use_gpu').checked,resize_mode:el('resize_mode').value,custom_resize:el('custom_resize').value};fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.success)alert('已保存');else alert('保存失败')}).catch(e=>alert('保存失败: '+e.message))}
-async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+function toggleLogs(){let b=el('log_body');if(b)b.style.display=b.style.display==='none'?'':'none'}
+async function resetLogs(){if(!confirm('确定要清空所有转码记录吗？\\n\\n累计节省空间统计会保留，磁盘上的视频文件不会被删除。'))return;try{let r=await fetch('/api/logs/reset',{method:'POST'});let d=await r.json();if(d.success){alert('已清空 '+d.deleted_count+' 条记录，累计统计已保留');refresh()}else{alert(d.error||'重置失败')}}catch(e){alert('重置失败: '+e.message)}}
 function toggleAllLogs(master){document.querySelectorAll('.log_cb').forEach(c=>{c.checked=master.checked})}
 async function batchDeleteLogs(){let ids=[];document.querySelectorAll('.log_cb').forEach(c=>{if(c.checked)ids.push(parseInt(c.value))});if(!ids.length){alert('请先勾选要删除的转码记录');return}if(!confirm('确定要删除选中的 '+ids.length+' 条转码记录吗？\\n\\n仅清除数据库记录，不删除磁盘上的视频文件。'))return;try{let r=await fetch('/api/logs/batch_delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})});let d=await r.json();if(d.success){alert('已删除 '+d.deleted_count+' 条记录');refresh()}else{alert(d.error||'批量删除失败')}}catch(e){alert('批量删除失败: '+e.message)}}
 var browsePath='/';

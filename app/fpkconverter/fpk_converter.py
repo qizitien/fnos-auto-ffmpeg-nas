@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.59'
+VERSION = '1.0.60'
 
 
 class Database:
@@ -68,6 +68,12 @@ class Database:
                         file_size INTEGER DEFAULT 0
                     )
                 ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS stats_cumulative (
+                        key TEXT PRIMARY KEY,
+                        value INTEGER DEFAULT 0
+                    )
+                ''')
                 conn.commit()
             finally:
                 conn.close()
@@ -114,11 +120,22 @@ class Database:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
+                # 查旧记录，判断是否需要累计 stats（避免同一文件重复转码重复计数）
+                cursor.execute('SELECT success FROM processed_files WHERE filepath = ?', (str(filepath),))
+                old = cursor.fetchone()
+                old_success = bool(old[0]) if old else False
                 cursor.execute('''
-                    INSERT OR REPLACE INTO processed_files 
+                    INSERT OR REPLACE INTO processed_files
                     (filepath, file_size, success, saved_size)
                     VALUES (?, ?, ?, ?)
                 ''', (str(filepath), file_size, int(success), saved_size))
+                # 仅在"新成功"时累计：从无记录或失败 → 成功
+                if success and not old_success:
+                    cursor.execute('INSERT INTO stats_cumulative (key, value) VALUES ("total_success_count", 1) '
+                                   'ON CONFLICT(key) DO UPDATE SET value = value + 1')
+                    cursor.execute('INSERT INTO stats_cumulative (key, value) VALUES ("total_saved_bytes", ?) '
+                                   'ON CONFLICT(key) DO UPDATE SET value = value + ?',
+                                   (int(saved_size or 0), int(saved_size or 0)))
                 conn.commit()
             finally:
                 conn.close()
