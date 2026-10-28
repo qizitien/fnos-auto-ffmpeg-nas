@@ -59,6 +59,4 @@ tar czf fpkconverter.fpk app.tgz cmd config wizard manifest ICON.PNG ICON_256.PN
 - v1.0.57：问题文件全选 + 批量删除选中
 - v1.0.56：初始版本
 
-## 作者
 
-yang
