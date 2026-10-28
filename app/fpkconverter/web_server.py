@@ -659,6 +659,30 @@ def api_logs():
                     'success_count':stats['success_count'],
                     'total_processed_mb':stats['total_processed_mb']})
 
+@app.route('/api/logs/batch_delete', methods=['POST'])
+def api_logs_batch_delete():
+    """批量删除转码日志记录（只删数据库行，不碰物理文件）。"""
+    data = request.get_json(silent=True) or {}
+    ids = data.get('ids')
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'success': False, 'error': '未选择任何记录'}), 400
+    try:
+        ids = [int(x) for x in ids]
+    except Exception:
+        return jsonify({'success': False, 'error': '记录 ID 无效'}), 400
+    deleted = 0
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        try:
+            cur = db.executemany('DELETE FROM processed_files WHERE id = ?', [(i,) for i in ids])
+            db.commit()
+            deleted = cur.rowcount
+        finally:
+            db.close()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'数据库错误: {e}'}), 500
+    return jsonify({'success': True, 'deleted_count': deleted})
+
 @app.route('/api/problems')
 def api_problems():
     _ensure_problem_schema()
@@ -991,8 +1015,16 @@ input[type=checkbox]{width:auto}
 <div class="stat"><div class="v" id="tc2">0</div><div class="l">处理文件总数</div></div>
 </div>
 <div class="card">
-<h3>转码记录</h3>
-<div class="tc"><table><thead><tr><th>文件</th><th>原大小(MB)</th><th>节省(MB)</th><th>状态</th><th>时间</th></tr></thead><tbody id="tb"></tbody></table></div>
+<h3>转码记录
+<div class="row">
+<button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="refresh()">刷新</button>
+<button class="btn b-err" style="padding:5px 12px;font-size:11px" onclick="batchDeleteLogs()">批量删除选中</button>
+</div></h3>
+<div class="tc"><table><thead><tr>
+<th style="width:32px"><input type="checkbox" id="log_select_all" onclick="toggleAllLogs(this)" title="全选/反选"></th>
+<th>文件</th><th>原大小(MB)</th><th>节省(MB)</th><th>状态</th><th>时间</th>
+</tr></thead><tbody id="tb"></tbody></table></div>
+<div class="info" style="margin-top:8px">批量删除仅清除转码记录，不删除磁盘上的视频文件。</div>
 </div>
 </div>
 
@@ -1058,7 +1090,9 @@ function removeDir(i){monitorDirs.splice(i,1);renderDirs();saveCfg()}
 function renderDirs(){let L=el('dirs_list');L.innerHTML='';if(!monitorDirs.length){L.innerHTML='<div class="info" style="margin-bottom:6px">尚未添加任何监控目录</div>';return}monitorDirs.forEach((d,i)=>{let w=document.createElement('div');w.className='dir_item';let sp=document.createElement('span');sp.textContent=d;let rm=document.createElement('button');rm.textContent='删除';rm.className='btn b-err';rm.style.cssText='padding:3px 10px;font-size:11px;flex-shrink:0';rm.onclick=()=>removeDir(i);w.appendChild(sp);w.appendChild(rm);L.appendChild(w)})}
 function toggleResizeCustom(){el('custom_resize_wrap').style.display=(el('resize_mode').value==='custom')?'block':'none'}
 function saveCfg(){let d={monitor_dirs:monitorDirs,crf:parseInt(el('crf').value),preset:el('preset').value,threads:parseInt(el('threads').value),codec:el('codec').value,container:el('container').value,use_gpu:el('use_gpu').checked,resize_mode:el('resize_mode').value,custom_resize:el('custom_resize').value};fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.success)alert('已保存');else alert('保存失败')}).catch(e=>alert('保存失败: '+e.message))}
-async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';l.logs.forEach(r=>{let tr=document.createElement('tr');['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+function toggleAllLogs(master){document.querySelectorAll('.log_cb').forEach(c=>{c.checked=master.checked})}
+async function batchDeleteLogs(){let ids=[];document.querySelectorAll('.log_cb').forEach(c=>{if(c.checked)ids.push(parseInt(c.value))});if(!ids.length){alert('请先勾选要删除的转码记录');return}if(!confirm('确定要删除选中的 '+ids.length+' 条转码记录吗？\\n\\n仅清除数据库记录，不删除磁盘上的视频文件。'))return;try{let r=await fetch('/api/logs/batch_delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})});let d=await r.json();if(d.success){alert('已删除 '+d.deleted_count+' 条记录');refresh()}else{alert(d.error||'批量删除失败')}}catch(e){alert('批量删除失败: '+e.message)}}
 var browsePath='/';
 async function openBrowser(p){if(p){browsePath=p}else{let v=(el('monitor_dir').value||'').trim();browsePath=v.startsWith('/')?v:'/'}try{let d=await fetch('/api/browse?path='+encodeURIComponent(browsePath)).then(r=>{if(!r.ok)return r.json().then(j=>{throw new Error(j.error||r.status)});return r.json()});if(d.error){alert(d.error);return}let m=el('modal'),lst=el('blist');browsePath=d.path;el('bpath').textContent=d.path;if(el('browser_path_input'))el('browser_path_input').value=d.path;lst.innerHTML='';if(d.message){let tip=document.createElement('div');tip.style.cssText='padding:10px 12px;background:rgba(245,158,11,.15);color:#fbbf24;border-radius:8px;margin-bottom:8px;white-space:pre-wrap;font-size:12px;line-height:1.5';tip.textContent=d.message;lst.appendChild(tip)}if(d.path!=='/'){let b=document.createElement('div');b.className='bitem';b.textContent='.. 返回上级';b.onclick=()=>openBrowser(d.path.split('/').slice(0,-1).join('/')||'/');lst.appendChild(b)}d.entries.forEach(e=>{let b=document.createElement('div');b.className='bitem';b.textContent=e.name+(e.is_dir?'/':'');if(e.no_access){b.style.opacity='0.4';if(e.is_dir)b.onclick=()=>alert('无权限访问此目录')}else if(e.is_dir){b.onclick=()=>openBrowser(e.path)}else{b.style.opacity='0.5'}lst.appendChild(b)});m.style.display='flex'}catch(e){alert('浏览目录失败: '+e.message)}}
 function openBrowserFromInput(){let p=(el('browser_path_input').value||'').trim();if(!p){alert('请输入完整路径');return}openBrowser(p)}

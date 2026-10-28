@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.58'
+VERSION = '1.0.59'
 
 
 class Database:
