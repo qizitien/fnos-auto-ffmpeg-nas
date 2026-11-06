@@ -792,7 +792,21 @@ def api_problem_recheck():
         return jsonify({'success':False,'error':f'数据库错误: {e}'}), 500
     return jsonify({'success':True})
 
-@app.route('/api/problems/batch_delete', methods=['POST'])
+@app.route('/api/problems/rescan_all', methods=['POST'])
+def api_problem_rescan_all():
+    """清空 problem_files 表，让下一轮扫描重新检测所有问题文件（不删物理文件）。"""
+    _ensure_problem_schema()
+    try:
+        db = sqlite3.connect(DB_PATH)
+        try:
+            cur = db.execute('DELETE FROM problem_files')
+            db.commit()
+            n = cur.rowcount
+        finally:
+            db.close()
+    except Exception as e:
+        return jsonify({'success':False,'error':f'数据库错误: {e}'}), 500
+    return jsonify({'success':True, 'cleared': n})
 def api_problem_batch_delete():
     """批量删除问题文件：与单删同样的安全白名单（必须在 problem_files 表中、
     不是系统路径、位于授权目录下），逐个删除文件并清理数据库记录。"""
@@ -1024,6 +1038,7 @@ input[type=checkbox]{width:auto}
 <h3>问题文件（损坏 / 转码失败）
 <div class="row">
 <button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="loadProblems()">刷新</button>
+<button class="btn" style="padding:5px 12px;font-size:11px" onclick="rescanAllProblems()" title="清空问题列表，让下一轮扫描重新检测所有失败文件（不删物理文件）">重新检查全部</button>
 <button class="btn b-err" style="padding:5px 12px;font-size:11px" onclick="batchDeleteProblems()">批量删除选中</button>
 </div></h3>
 <div id="prob_empty" class="info" style="padding:20px 0;text-align:center">暂无问题文件</div>
@@ -1155,6 +1170,7 @@ async function loadProblems(){try{let d=await fetch('/api/problems').then(r=>{if
 function toggleAllProblems(master){document.querySelectorAll('.prob_cb').forEach(c=>{c.checked=master.checked})}
 async function batchDeleteProblems(){let fps=[];document.querySelectorAll('.prob_cb').forEach(c=>{if(c.checked)fps.push(c.value)});if(!fps.length){alert('请先勾选要删除的问题文件');return}if(!confirm('确定要永久删除选中的 '+fps.length+' 个文件吗？\\n\\n此操作不可恢复！'))return;try{let r=await fetch('/api/problems/batch_delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepaths:fps})});let d=await r.json();if(d.success){let msg='已删除 '+d.deleted_count+' 个文件';if(d.skipped&&d.skipped.length)msg+='\\n跳过 '+d.skipped.length+' 个';if(d.errors&&d.errors.length)msg+='\\n失败 '+d.errors.length+' 个';alert(msg);loadProblems()}else{alert(d.error||'批量删除失败')}}catch(e){alert('批量删除失败: '+e.message)}}
 function probRecheck(fp){fetch('/api/problems/recheck',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('已从问题列表移除');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
+function rescanAllProblems(){if(!confirm('将清空所有问题文件记录，让下一轮扫描（最多 60 秒内）重新检测这些失败文件。\\n\\n不会删除物理文件，只是让它们重新尝试转码。\\n\\n确定继续吗？'))return;fetch('/api/problems/rescan_all',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.success){alert('已清空问题列表，将在下一轮扫描时重新检测 '+d.cleared+' 个文件');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
 function probDelete(fp){if(!confirm('确定要永久删除该文件吗？\\n\\n'+fp+'\\n\\n此操作不可恢复！'))return;fetch('/api/problems/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('文件已删除');loadProblems()}else{alert(d.error||'删除失败')}}).catch(e=>alert('删除失败: '+e.message))}
 renderDirs();toggleResizeCustom();refresh();setInterval(refresh,5000);loadProblems()</script>
 </body></html>'''
@@ -1181,4 +1197,22 @@ if __name__ == '__main__':
         sys.exit(0)
     signal.signal(signal.SIGTERM, _sigterm)
     print(f'Starting on http://0.0.0.0:5000 (packages:{PKG_DIR})', flush=True)
+    # 断点续连：如果上次保存时服务是启用状态，启动后自动恢复转码进程
+    def _auto_resume():
+        import time as _t
+        for _ in range(10):
+            _t.sleep(1)
+        try:
+            with app.test_client() as c:
+                r = c.post('/api/start')
+                if r.status_code == 200:
+                    print('[auto-resume] 已自动恢复转码服务', flush=True)
+                else:
+                    print(f'[auto-resume] 自动启动返回: {r.get_json()}', flush=True)
+        except Exception as e:
+            print(f'[auto-resume] 自动恢复失败: {e}', flush=True)
+    if cfg.get('enabled'):
+        import threading as _th
+        _th.Thread(target=_auto_resume, daemon=True).start()
+        print('[auto-resume] 检测到 enabled=True，将在 10 秒后自动启动转码服务...', flush=True)
     app.run(host='0.0.0.0', port=5000, debug=False)
