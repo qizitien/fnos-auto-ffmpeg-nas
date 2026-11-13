@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.63'
+VERSION = '1.0.64'
 
 
 class Database:
@@ -274,7 +274,7 @@ class Database:
 
 class VideoConverter:
     VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp'}
-    ALLOWED_CODECS = {'hevc_qsv', 'h264_qsv', 'libx264', 'libx265'}
+    ALLOWED_CODECS = {'hevc_qsv', 'h264_qsv', 'hevc_nvenc', 'h264_nvenc', 'libx264', 'libx265'}
     ALLOWED_CONTAINERS = {'mp4', 'mkv'}
     ALLOWED_PRESETS = {'ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'}
     
@@ -425,6 +425,15 @@ class VideoConverter:
     def _gpu_diagnostic_message(self):
         if not self.use_gpu:
             return ''
+        # NVIDIA NVENC 后端：检测 /dev/nvidia* 与 nvidia-smi
+        if self.codec.endswith('_nvenc'):
+            try:
+                nv_devices = sorted(str(p) for p in Path('/dev').glob('nvidia*'))
+            except Exception:
+                nv_devices = []
+            if nv_devices:
+                return f"NVENC/GPU 诊断: 检测到 NVIDIA 设备 {', '.join(nv_devices[:4])}，将尝试 NVENC 转码。"
+            return 'NVENC/GPU 诊断: 未发现 /dev/nvidia* 设备，可能缺少 NVIDIA 驱动或应用未授权访问显卡；NVENC 失败后将回退 CPU 编码。'
         if not os.path.exists('/dev/dri'):
             return 'QSV/GPU 诊断: 未发现 /dev/dri，应用进程无法访问 Intel GPU 设备，无法进行 QSV 转码。'
         try:
@@ -965,6 +974,7 @@ class VideoConverter:
     def _build_ffmpeg_cmd(self, input_path, output_path, target_codec, target_width, target_height, needs_resize,
                           preset_override=None, progress=False, qsv_device=None, color_info=None):
         is_qsv = target_codec.endswith('_qsv')
+        is_nvenc = target_codec.endswith('_nvenc')
         cmd = [self._ffmpeg_binary(), '-hide_banner', '-nostats']
         if is_qsv and qsv_device:
             cmd.extend(['-qsv_device', qsv_device])
@@ -976,12 +986,21 @@ class VideoConverter:
         if is_qsv:
             cmd.extend(['-preset', 'medium'])
             cmd.extend(['-global_quality', str(self.target_quality)])
+        elif is_nvenc:
+            # NVIDIA NVENC：Pascal 起支持恒定质量 -cq；不接受 -crf / -threads
+            nvenc_preset = {'ultrafast':'p1','superfast':'p2','veryfast':'p3','faster':'p4',
+                            'fast':'p4','medium':'p5','slow':'p6','slower':'p6','veryslow':'p7'}.get(
+                                preset_override or self.preset, 'p5')
+            cmd.extend(['-preset', nvenc_preset])
+            cmd.extend(['-rc', 'vbr', '-cq', str(self.target_quality), '-b:v', '0'])
+            cmd.extend(['-maxrate', f'{self.MAX_BITRATE}', '-bufsize', f'{self.MAX_BITRATE * 2}'])
         else:
             cmd.extend(['-preset', preset_override or self.preset])
             cmd.extend(['-crf', str(self.target_quality)])
             cmd.extend(['-maxrate', f'{self.MAX_BITRATE}'])
             cmd.extend(['-bufsize', f'{self.MAX_BITRATE * 2}'])
-        cmd.extend(['-threads', str(self.threads)])
+        if not is_nvenc:
+            cmd.extend(['-threads', str(self.threads)])
 
         # 构建 -vf 滤镜链：scale（如有）+ fps（如固定帧率）
         vf_parts = []
@@ -1020,9 +1039,9 @@ class VideoConverter:
         return cmd
 
     def _cpu_fallback_codec(self, target_codec):
-        if target_codec == 'h264_qsv':
+        if target_codec in ('h264_qsv', 'h264_nvenc'):
             return 'libx264'
-        if target_codec == 'hevc_qsv':
+        if target_codec in ('hevc_qsv', 'hevc_nvenc'):
             return 'libx265'
         return None
 
@@ -1126,8 +1145,12 @@ class VideoConverter:
             self.db.add_processed_file(input_path, original_size, True, 0)
             return True, 0
         
-        # 勾选 GPU 时严格只使用 QSV；QSV 不可用就失败停止，不再自动 CPU 降级。
-        if self.use_gpu and self.codec in ('libx265', 'hevc_qsv'):
+        # 编码器选择：
+        # - 已选明确硬件编码器（Intel QSV / NVIDIA NVENC）时直接使用；
+        # - 软件编码且勾选 GPU 时，按旧逻辑映射到 Intel QSV（向后兼容）。
+        if self.codec.endswith('_qsv') or self.codec.endswith('_nvenc'):
+            target_codec = self.codec
+        elif self.use_gpu and self.codec in ('libx265', 'hevc_qsv'):
             target_codec = 'hevc_qsv'
         elif self.use_gpu and self.codec == 'libx264':
             target_codec = 'h264_qsv'

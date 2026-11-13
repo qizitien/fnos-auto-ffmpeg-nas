@@ -46,7 +46,7 @@ def add_headers(r):
     return r
 
 ALLOWED = {'monitor_dir','monitor_dirs','crf','codec','container','preset','threads','use_gpu','resize_mode','custom_resize','fps_mode','output_mode','output_dir','enabled'}
-CODECS = ('libx264','libx265')
+CODECS = ('libx264','libx265','h264_qsv','hevc_qsv','h264_nvenc','hevc_nvenc')
 CONTAINERS = ('mp4','mkv')
 PRESETS = ('ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow')
 RESIZE_MODES = ('keep','4k','2k','1080p','540p','480p','360p','custom')
@@ -1117,8 +1117,12 @@ input[type=checkbox]{width:auto}
 <div class="fg"><label>编码预设（越慢越省空间）</label><select id="preset">{% for p in ['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'] %}<option value="{{p}}" {%if p==config.preset%}selected{%endif%}>{{p}}</option>{%endfor%}</select></div>
 <div class="fg"><label>线程数（最多 4）</label><input type="number" id="threads" min="1" max="4" value="{{config.threads}}"></div>
 <div class="fg"><label>编码器</label><select id="codec">
-<option value="libx264" {%if config.codec=="libx264"%}selected{%endif%}>H.264（兼容性好）</option>
-<option value="libx265" {%if config.codec=="libx265"%}selected{%endif%}>H.265（更省空间）</option>
+<option value="libx264" {%if config.codec=="libx264"%}selected{%endif%}>H.264 软件（兼容性好）</option>
+<option value="libx265" {%if config.codec=="libx265"%}selected{%endif%}>H.265 软件（更省空间）</option>
+<option value="h264_qsv" {%if config.codec=="h264_qsv"%}selected{%endif%}>H.264 Intel QSV 核显硬件加速</option>
+<option value="hevc_qsv" {%if config.codec=="hevc_qsv"%}selected{%endif%}>H.265 Intel QSV 核显硬件加速</option>
+<option value="h264_nvenc" {%if config.codec=="h264_nvenc"%}selected{%endif%}>H.264 NVIDIA NVENC 独显硬件加速</option>
+<option value="hevc_nvenc" {%if config.codec=="hevc_nvenc"%}selected{%endif%}>H.265 NVIDIA NVENC 独显硬件加速</option>
 </select></div>
 <div class="fg"><label>封装格式</label><select id="container">
 <option value="mp4" {%if config.container=="mp4"%}selected{%endif%}>MP4</option>
