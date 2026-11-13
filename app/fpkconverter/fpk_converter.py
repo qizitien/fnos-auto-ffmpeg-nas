@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.64'
+VERSION = '1.0.65'
 
 
 class Database:
@@ -306,6 +306,10 @@ class VideoConverter:
         self._queue = []
         self._active_paths = set()
         self._queue_lock = threading.Lock()
+        # 当前活跃 worker 线程数（多 worker 并发转码，配合 NVENC 多编码单元）
+        self._worker_count = 0
+        # 并发转码任务数：1=串行（默认），2=两个任务同时转（P4 双 NVENC 单元）
+        self.concurrent_tasks = 1
         self._worker_running = False
         self.recent_events = {}
         self.event_lock = threading.Lock()
@@ -794,21 +798,24 @@ class VideoConverter:
         self._ensure_worker()
 
     def _ensure_worker(self):
+        target = max(1, min(2, int(getattr(self, 'concurrent_tasks', 1) or 1)))
         with self._queue_lock:
-            if self._worker_running:
+            if self._worker_count >= target:
                 return
+            self._worker_count += 1
             self._worker_running = True
-        t = threading.Thread(target=self._serial_worker, daemon=True)
+        t = threading.Thread(target=self._worker_loop, daemon=True)
         t.start()
 
-    def _serial_worker(self):
+    def _worker_loop(self):
         while True:
             item = None
             with self._queue_lock:
                 if self._queue:
                     item = self._queue.pop(0)
                 else:
-                    self._worker_running = False
+                    self._worker_count -= 1
+                    self._worker_running = self._worker_count > 0
                     return
             
             filepath_str = item['path']
@@ -1190,7 +1197,7 @@ class VideoConverter:
                   f"LIBVA_DRIVERS_PATH={env.get('LIBVA_DRIVERS_PATH', '')}")
         print(f"开始转码: {input_path} (大小: {original_size / (1024*1024):.2f} MB)")
 
-        unique_id = f"{os.getpid()}_{int(time.time())}"
+        unique_id = f"{os.getpid()}_{threading.get_ident()}_{int(time.time()*1000)}"
         safe_stem = self._safe_temp_stem(input_path)
         if self.temp_dir and self.temp_dir.is_dir():
             output_path = self.temp_dir / f"{safe_stem}_tmp_{unique_id}.{self.container}"
