@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.71'
+VERSION = '1.0.72'
 
 
 class Database:
@@ -848,9 +848,13 @@ class VideoConverter:
         if not self.state_file:
             return
         try:
+            state_dir = os.path.dirname(os.path.abspath(self.state_file))
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
             with self.task_lock:
                 snap = [{'path': k, **v} for k, v in self.task_status.items()]
-            tmp = self.state_file + '.tmp'
+            # 多 worker 并发写同一状态文件：临时文件按 进程+线程 唯一命名，避免互相踩掉 .tmp 导致 replace 报 ENOENT
+            tmp = f"{self.state_file}.{os.getpid()}.{threading.get_ident()}.tmp"
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump({'tasks': snap}, f, ensure_ascii=False)
             os.replace(tmp, self.state_file)
@@ -1066,6 +1070,9 @@ class VideoConverter:
             cmd.extend(['-qsv_device', qsv_device])
         if progress:
             cmd.extend(['-progress', 'pipe:1'])
+        if is_nvenc:
+            # GPU 硬解码：把解码环节卸载到 NVIDIA NVDEC，避免 CPU 软解大码率片源
+            cmd.extend(['-hwaccel', 'cuda'])
         cmd.extend(['-i', str(input_path)])
         cmd.extend(['-c:v', target_codec])
 
