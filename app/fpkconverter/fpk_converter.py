@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.73'
+VERSION = '1.0.74'
 
 
 class Database:
@@ -1065,14 +1065,21 @@ class VideoConverter:
                           preset_override=None, progress=False, qsv_device=None, color_info=None):
         is_qsv = target_codec.endswith('_qsv')
         is_nvenc = target_codec.endswith('_nvenc')
+        fps_mode = getattr(self, 'fps_mode', 'keep') or 'keep'
+        custom_scale = getattr(self, 'resize_mode', '') == 'custom' and bool(self.custom_resize)
+        # 全 GPU 管线：帧留在显存，缩放用 scale_cuda，NVENC 直接吃显存帧，避免回读内存喂不满编码器；
+        # 固定帧率 / 自定义滤镜时滤镜在 CPU 跑，帧回内存，走半 GPU 链路。
+        cuda_chain = is_nvenc and fps_mode == 'keep' and not custom_scale
         cmd = [self._ffmpeg_binary(), '-hide_banner', '-nostats']
         if is_qsv and qsv_device:
             cmd.extend(['-qsv_device', qsv_device])
         if progress:
             cmd.extend(['-progress', 'pipe:1'])
         if is_nvenc:
-            # GPU 硬解码：把解码环节卸载到 NVIDIA NVDEC，避免 CPU 软解大码率片源
-            cmd.extend(['-hwaccel', 'cuda'])
+            if cuda_chain:
+                cmd.extend(['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'])
+            else:
+                cmd.extend(['-hwaccel', 'cuda'])
         cmd.extend(['-i', str(input_path)])
         cmd.extend(['-c:v', target_codec])
 
@@ -1098,11 +1105,13 @@ class VideoConverter:
         # 构建 -vf 滤镜链：scale（如有）+ fps（如固定帧率）
         vf_parts = []
         if needs_resize:
-            if hasattr(self, 'resize_mode') and self.resize_mode == 'custom' and self.custom_resize:
+            if custom_scale:
                 if self.custom_resize.startswith('scale='):
                     vf_parts.append(self.custom_resize[len('scale='):])
                 else:
                     vf_parts.append(self.custom_resize)
+            elif cuda_chain:
+                vf_parts.append(f'scale_cuda={target_width}:{target_height}')
             else:
                 vf_parts.append(f'scale={target_width}:{target_height}')
         # FPS 控制：keep 不处理；30/60 追加 fps= 滤镜
