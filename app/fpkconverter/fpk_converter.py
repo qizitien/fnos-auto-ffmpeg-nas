@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.69'
+VERSION = '1.0.70'
 
 
 class Database:
@@ -281,7 +281,10 @@ class VideoConverter:
     MAX_BITRATE = 13 * 1000 * 1000  # 13 Mbps
     SKIP_FILE_SIZE = 10 * 1000 * 1000  # 10 MB - 小于此大小的文件跳过
     SKIP_BITRATE = 5000 * 1000  # 5000 kbps = 5 Mbps - HEVC 1080p 低于此码率跳过
-    TRANSCODE_DELAY = 300  # 5 分钟：等待文件写入稳定后再转码
+    TRANSCODE_DELAY = 300  # 兜底上限：文件持续被写入时，最多等待此秒数后再处理
+    STABLE_CHECK_INTERVAL = 5  # 稳定性采样间隔（秒）
+    STABLE_REQUIRED_CHECKS = 2  # 连续多次大小/修改时间不变，即判定文件稳定
+    STABLE_MIN_WAIT = 10  # 入队后最少观察秒数，避免文件刚入队还在写入就开始转码
     TEMP_MAX_GB = 30
     MIN_CRF = 18
     MAX_CRF = 32
@@ -882,15 +885,32 @@ class VideoConverter:
             try:
                 wait_until = queued_at + self.TRANSCODE_DELAY
                 last_wait_log = 0
+                stable_checks = 0
+                last_size = None
+                last_mtime = None
                 while time.time() < wait_until:
                     if not os.path.exists(filepath_str):
                         print(f"文件在等待期间被删除，跳过: {filepath_str}")
+                        break
+                    try:
+                        st = os.stat(filepath_str)
+                        cur_size, cur_mtime = st.st_size, st.st_mtime
+                    except Exception:
+                        cur_size, cur_mtime = None, None
+                    if cur_size is not None and cur_size > 0 and cur_size == last_size and cur_mtime == last_mtime:
+                        stable_checks += 1
+                    else:
+                        stable_checks = 0
+                    last_size, last_mtime = cur_size, cur_mtime
+                    elapsed = time.time() - queued_at
+                    if stable_checks >= self.STABLE_REQUIRED_CHECKS and elapsed >= self.STABLE_MIN_WAIT:
+                        print(f"文件已稳定，提前开始转码: {filepath_str}")
                         break
                     remaining = int(wait_until - time.time())
                     if last_wait_log == 0 or time.time() - last_wait_log >= 30 or remaining <= 5:
                         print(f"文件已入队，等待文件稳定: {filepath_str}，剩余约 {max(0, remaining)} 秒")
                         last_wait_log = time.time()
-                    time.sleep(min(5, max(1, remaining)))
+                    time.sleep(min(self.STABLE_CHECK_INTERVAL, max(1, remaining)))
                 
                 if not os.path.exists(filepath_str):
                     continue
