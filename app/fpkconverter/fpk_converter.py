@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.65'
+VERSION = '1.0.66'
 
 
 class Database:
@@ -286,6 +286,9 @@ class VideoConverter:
     MIN_CRF = 18
     MAX_CRF = 32
     MAX_THREADS = 4
+    # 最大并发转码任务数：内置上限，按显卡编码单元自动吃满；
+    # 队列不足时不会强行起满，单元不足的任务自动回退 CPU 编码。
+    MAX_CONCURRENT_TASKS = 4
     FAILURE_RETRY_DELAYS = (1800, 7200, 21600)  # 30分钟、2小时、6小时
     MAX_FAILURE_RETRIES = 3
     TEMP_LOG_MAX_KEEP = 50
@@ -308,8 +311,8 @@ class VideoConverter:
         self._queue_lock = threading.Lock()
         # 当前活跃 worker 线程数（多 worker 并发转码，配合 NVENC 多编码单元）
         self._worker_count = 0
-        # 并发转码任务数：1=串行（默认），2=两个任务同时转（P4 双 NVENC 单元）
-        self.concurrent_tasks = 1
+        # 并发转码任务数：不再由前端配置，默认按内置最大并发运行，吃满显卡编码单元
+        self.concurrent_tasks = self.MAX_CONCURRENT_TASKS
         self._worker_running = False
         self.recent_events = {}
         self.event_lock = threading.Lock()
@@ -798,7 +801,7 @@ class VideoConverter:
         self._ensure_worker()
 
     def _ensure_worker(self):
-        target = max(1, min(2, int(getattr(self, 'concurrent_tasks', 1) or 1)))
+        target = max(1, int(getattr(self, 'concurrent_tasks', self.MAX_CONCURRENT_TASKS) or self.MAX_CONCURRENT_TASKS))
         with self._queue_lock:
             if self._worker_count >= target:
                 return

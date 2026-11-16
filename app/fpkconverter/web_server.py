@@ -45,7 +45,7 @@ def add_headers(r):
     r.headers['X-Content-Type-Options'] = 'nosniff'
     return r
 
-ALLOWED = {'monitor_dir','monitor_dirs','crf','codec','container','preset','threads','concurrent_tasks','use_gpu','resize_mode','custom_resize','fps_mode','output_mode','output_dir','enabled'}
+ALLOWED = {'monitor_dir','monitor_dirs','crf','codec','container','preset','threads','use_gpu','resize_mode','custom_resize','fps_mode','output_mode','output_dir','enabled'}
 CODECS = ('libx264','libx265','h264_qsv','hevc_qsv','h264_nvenc','hevc_nvenc')
 CONTAINERS = ('mp4','mkv')
 PRESETS = ('ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow')
@@ -53,7 +53,7 @@ RESIZE_MODES = ('keep','4k','2k','1080p','540p','480p','360p','custom')
 FPS_MODES = ('keep','30','60')
 OUTPUT_MODES = ('overwrite','custom_dir')
 DEFAULT = {'monitor_dir':'','monitor_dirs':[],'crf':23,'codec':'libx264','container':'mp4',
-           'preset':'medium','threads':1,'concurrent_tasks':1,'use_gpu':True,'resize_mode':'1080p','custom_resize':'',
+           'preset':'medium','threads':1,'use_gpu':True,'resize_mode':'1080p','custom_resize':'',
            'fps_mode':'keep','output_mode':'overwrite','output_dir':'','enabled':False}
 MIN_CRF = 18
 MAX_CRF = 32
@@ -443,9 +443,6 @@ def api_cfg():
             elif k == 'threads':
                 try: cfg[k] = max(1, min(MAX_THREADS, int(v)))
                 except: pass
-            elif k == 'concurrent_tasks':
-                try: cfg[k] = max(1, min(2, int(v)))
-                except: pass
             elif k == 'use_gpu': cfg[k] = bool(v)
         save_cfg()
         _sync_monitor_aliases()
@@ -490,7 +487,7 @@ def api_start():
         'db_path':DB_PATH, 'code_dir':SCRIPT_DIR, 'monitor_dirs':validated_dirs,
         'crf':cfg.get('crf',23), 'codec':cfg.get('codec','libx264'),
         'container':cfg.get('container','mp4'), 'preset':cfg.get('preset','medium'),
-        'threads':cfg.get('threads',1), 'concurrent_tasks':cfg.get('concurrent_tasks',1), 'use_gpu':cfg.get('use_gpu',True),
+        'threads':cfg.get('threads',1), 'use_gpu':cfg.get('use_gpu',True),
         'resize_mode':cfg.get('resize_mode','1080p'), 'custom_resize':cfg.get('custom_resize',''),
         'fps_mode':cfg.get('fps_mode','keep'),
         'output_mode':cfg.get('output_mode','overwrite'), 'output_dir':cfg.get('output_dir',''),
@@ -546,7 +543,6 @@ vc.fps_mode=c.get("fps_mode","keep")
 vc.output_mode=c.get("output_mode","overwrite")
 vc.output_dir=c.get("output_dir","")
 vc.monitor_dirs=list(c.get("monitor_dirs") or [])
-vc.concurrent_tasks=max(1,min(2,int(c.get("concurrent_tasks",1) or 1)))
 print(f"编码器: {vc.codec}, GPU: {vc.use_gpu}, 分辨率: {vc.resize_mode}, 自定义: {vc.custom_resize!r}, FPS: {vc.fps_mode}, 输出: {vc.output_mode} -> {vc.output_dir or '覆盖原文件'}")
 dirs=c.get("monitor_dirs") or ([c["monitor_dir"]] if c.get("monitor_dir") else [])
 if not dirs:
@@ -1120,10 +1116,6 @@ input[type=checkbox]{width:auto}
 <div class="fg"><label>CRF（18-32，越小质量越高）</label><input type="number" id="crf" min="18" max="32" value="{{config.crf}}"></div>
 <div class="fg"><label>编码预设（越慢越省空间）</label><select id="preset">{% for p in ['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'] %}<option value="{{p}}" {%if p==config.preset%}selected{%endif%}>{{p}}</option>{%endfor%}</select></div>
 <div class="fg"><label>线程数（最多 4，软件编码用）</label><input type="number" id="threads" min="1" max="4" value="{{config.threads}}"></div>
-<div class="fg"><label>并发转码任务数（NVIDIA 双 NVENC 单元可设 2）</label><select id="concurrent_tasks">
-<option value="1" {%if config.concurrent_tasks==1%}selected{%endif%}>1（串行）</option>
-<option value="2" {%if config.concurrent_tasks==2%}selected{%endif%}>2（双任务并行，占满两个编码单元）</option>
-</select></div>
 <div class="fg"><label>编码器</label><select id="codec">
 <option value="libx264" {%if config.codec=="libx264"%}selected{%endif%}>H.264 软件（兼容性好）</option>
 <option value="libx265" {%if config.codec=="libx265"%}selected{%endif%}>H.265 软件（更省空间）</option>
@@ -1168,8 +1160,8 @@ function removeDir(i){monitorDirs.splice(i,1);renderDirs();saveCfg()}
 function renderDirs(){let L=el('dirs_list');L.innerHTML='';if(!monitorDirs.length){L.innerHTML='<div class="info" style="margin-bottom:6px">尚未添加任何监控目录</div>';return}monitorDirs.forEach((d,i)=>{let w=document.createElement('div');w.className='dir_item';let sp=document.createElement('span');sp.textContent=d;let rm=document.createElement('button');rm.textContent='删除';rm.className='btn b-err';rm.style.cssText='padding:3px 10px;font-size:11px;flex-shrink:0';rm.onclick=()=>removeDir(i);w.appendChild(sp);w.appendChild(rm);L.appendChild(w)})}
 function toggleResizeCustom(){el('custom_resize_wrap').style.display=(el('resize_mode').value==='custom')?'block':'none'}
 function toggleOutputDir(){el('output_dir_wrap').style.display=(el('output_mode').value==='custom_dir')?'block':'none'}
-function saveCfg(){let d={monitor_dirs:monitorDirs,crf:parseInt(el('crf').value),preset:el('preset').value,threads:parseInt(el('threads').value),concurrent_tasks:parseInt(el('concurrent_tasks').value),codec:el('codec').value,container:el('container').value,use_gpu:el('use_gpu').checked,resize_mode:el('resize_mode').value,custom_resize:el('custom_resize').value,fps_mode:el('fps_mode').value,output_mode:el('output_mode').value,output_dir:el('output_dir').value};fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.success)alert('已保存');else alert('保存失败')}).catch(e=>alert('保存失败: '+e.message))}
-async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('concurrent_tasks').value=s.config.concurrent_tasks||1;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';el('fps_mode').value=s.config.fps_mode||'keep';el('output_mode').value=s.config.output_mode||'overwrite';el('output_dir').value=s.config.output_dir||'';toggleOutputDir();if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+function saveCfg(){let d={monitor_dirs:monitorDirs,crf:parseInt(el('crf').value),preset:el('preset').value,threads:parseInt(el('threads').value),codec:el('codec').value,container:el('container').value,use_gpu:el('use_gpu').checked,resize_mode:el('resize_mode').value,custom_resize:el('custom_resize').value,fps_mode:el('fps_mode').value,output_mode:el('output_mode').value,output_dir:el('output_dir').value};fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.success)alert('已保存');else alert('保存失败')}).catch(e=>alert('保存失败: '+e.message))}
+async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';el('fps_mode').value=s.config.fps_mode||'keep';el('output_mode').value=s.config.output_mode||'overwrite';el('output_dir').value=s.config.output_dir||'';toggleOutputDir();if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
 function toggleLogs(){let b=el('log_body');if(b)b.style.display=b.style.display==='none'?'':'none'}
 async function resetLogs(){if(!confirm('确定要清空所有转码记录吗？\\n\\n累计节省空间统计会保留，磁盘上的视频文件不会被删除。'))return;try{let r=await fetch('/api/logs/reset',{method:'POST'});let d=await r.json();if(d.success){alert('已清空 '+d.deleted_count+' 条记录，累计统计已保留');refresh()}else{alert(d.error||'重置失败')}}catch(e){alert('重置失败: '+e.message)}}
 function toggleAllLogs(master){document.querySelectorAll('.log_cb').forEach(c=>{c.checked=master.checked})}
