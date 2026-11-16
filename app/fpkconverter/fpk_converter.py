@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.72'
+VERSION = '1.0.73'
 
 
 class Database:
@@ -289,9 +289,9 @@ class VideoConverter:
     MIN_CRF = 18
     MAX_CRF = 32
     MAX_THREADS = 4
-    # 最大并发转码任务数：内置上限，按显卡编码单元自动吃满；
-    # 队列不足时不会强行起满，单元不足的任务自动回退 CPU 编码。
-    MAX_CONCURRENT_TASKS = 4
+    # 最大并发转码任务数：与 Tesla P4 的 2 个 NVENC 编码单元对齐，2 路并行正好吃满显卡；
+    # 队列不足时不会强行起满。
+    MAX_CONCURRENT_TASKS = 2
     FAILURE_RETRY_DELAYS = (1800, 7200, 21600)  # 30分钟、2小时、6小时
     MAX_FAILURE_RETRIES = 3
     TEMP_LOG_MAX_KEEP = 50
