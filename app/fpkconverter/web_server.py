@@ -35,7 +35,7 @@ ACCESSIBLE_PATHS_FILE = os.path.join(VAR_DIR, 'accessible_paths')
 LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 
-import subprocess, sqlite3, time, json, threading
+import subprocess, sqlite3, time, json, threading, shutil
 from flask import Flask, render_template_string, request, jsonify
 
 app = Flask(__name__)
@@ -73,6 +73,9 @@ conv_log_file = None
 last_error = ''
 proc_started_at = None
 proc_lock = threading.Lock()
+# CPU 占用率需要两次 /proc/stat 采样做差，模块级保留上一次快照
+_cpu_last_snapshot = None
+_cpu_snap_lock = threading.Lock()
 
 def _rotate_log_if_needed(path, max_bytes=None, backup_count=None):
     max_bytes = LOG_MAX_BYTES if max_bytes is None else max_bytes
@@ -363,6 +366,92 @@ def _parse_process_state(lines):
             state['current_activity'] = clean
     return state
 
+def _read_cpu_stat():
+    """读取 /proc/stat 得到 (total, idle) 快照；非 Linux 或失败返回 None。"""
+    try:
+        with open('/proc/stat') as f:
+            parts = f.readline().split()
+        if parts[0] != 'cpu':
+            return None
+        vals = [int(x) for x in parts[1:]]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)  # idle + iowait
+        return sum(vals), idle
+    except Exception:
+        return None
+
+def _read_meminfo():
+    """返回 (used_mb, total_mb, percent)；失败返回 None。"""
+    try:
+        info = {}
+        with open('/proc/meminfo') as f:
+            for line in f:
+                k, _, rest = line.partition(':')
+                info[k] = int(rest.strip().split()[0])  # kB
+        total = info.get('MemTotal')
+        avail = info.get('MemAvailable', info.get('MemFree'))
+        if not total:
+            return None
+        used = total - avail
+        return round(used / 1024), round(total / 1024), round(used / total * 100, 1)
+    except Exception:
+        return None
+
+def _read_nvidia_gpus():
+    """通过 nvidia-smi 采集每块 NVIDIA 卡占用；不可用返回空列表。"""
+    gpus = []
+    try:
+        bin_path = shutil.which('nvidia-smi') or '/usr/bin/nvidia-smi'
+        if not os.path.exists(bin_path):
+            return gpus
+        r = subprocess.run([bin_path,
+            '--query-gpu=name,utilization.gpu,utilization.memory,temperature.gpu,memory.used,memory.total',
+            '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return gpus
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            cols = [c.strip() for c in line.split(',')]
+            if len(cols) < 6:
+                continue
+            def _num(x):
+                try: return float(x)
+                except Exception: return None
+            gpus.append({
+                'name': cols[0],
+                'utilization_gpu': _num(cols[1]),
+                'utilization_mem': _num(cols[2]),
+                'temperature': _num(cols[3]),
+                'mem_used_mb': _num(cols[4]),
+                'mem_total_mb': _num(cols[5]),
+            })
+    except Exception:
+        pass
+    return gpus
+
+def _system_stats():
+    cpu_percent = None
+    snap = _read_cpu_stat()
+    if snap is not None:
+        global _cpu_last_snapshot
+        with _cpu_snap_lock:
+            prev = _cpu_last_snapshot
+            _cpu_last_snapshot = snap
+        if prev is not None:
+            pt, pi = prev
+            ct, ci = snap
+            dt, di = ct - pt, ci - pi
+            if dt > 0:
+                cpu_percent = round((1 - di / dt) * 100, 1)
+    mem = _read_meminfo()
+    return {
+        'cpu_percent': cpu_percent,
+        'memory': {'used_mb': mem[0], 'total_mb': mem[1], 'percent': mem[2]} if mem else None,
+        'gpus': _read_nvidia_gpus(),
+    }
+
 def _process_snapshot():
     running = _is_running()
     lines = _tail_lines(CONV_LOG)
@@ -456,7 +545,7 @@ def api_status():
     process, lines = _process_snapshot()
     display_error = last_error or process.get('last_error', '')
     return jsonify({'running':process['running'], 'config':cfg, 'error':display_error,
-                    'process':process, 'recent_log':lines,
+                    'process':process, 'recent_log':lines, 'system':_system_stats(),
                     'authorized_roots': get_authorized_roots()})
 
 TEMP_DIR = os.path.join(VAR_DIR, 'temp')
@@ -964,6 +1053,13 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(1200px
 .pbar{height:8px;background:var(--card2);border-radius:99px;overflow:hidden;margin-top:8px}
 .pfill{height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .3s}
 .ptext{font-size:11px;color:var(--mut);margin-top:5px;text-align:right}
+.res-row{display:grid;grid-template-columns:64px 1fr 96px;gap:10px;align-items:center;margin-bottom:10px}
+.res-label{font-size:12px;color:var(--mut)}
+.res-row .pbar{margin-top:0}
+.res-row .ptext{margin-top:0;text-align:right}
+.gpu-item{margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.gpu-name{font-size:12px;margin-bottom:6px;display:flex;justify-content:space-between;gap:10px}
+.gpu-name .gstat{color:var(--mut);font-size:11px}
 .logbox{background:#0a0c12;color:#a5b4cf;border-radius:10px;padding:12px;max-height:240px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;white-space:pre-wrap;border:1px solid var(--border)}
 .errbox{background:rgba(239,68,68,.08);color:#fca5a5;border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 12px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
 .errmsg{color:#fca5a5;font-size:12px;margin-top:8px;padding:8px 12px;background:rgba(239,68,68,.1);border-radius:8px;display:none}
@@ -1017,6 +1113,20 @@ input[type=checkbox]{width:auto}
 <div class="kv"><div class="k">运行时长</div><div class="v" id="process_uptime">-</div></div>
 <div class="kv"><div class="k">当前文件</div><div class="v" id="current_file">-</div></div>
 <div class="kv"><div class="k">当前状态</div><div class="v" id="current_activity">-</div></div>
+</div>
+<div class="card">
+<h3>系统资源</h3>
+<div class="res-row">
+<div class="res-label">CPU</div>
+<div class="pbar"><div class="pfill" id="cpu_fill"></div></div>
+<div class="ptext" id="cpu_text">-</div>
+</div>
+<div class="res-row">
+<div class="res-label">内存</div>
+<div class="pbar"><div class="pfill" id="mem_fill"></div></div>
+<div class="ptext" id="mem_text">-</div>
+</div>
+<div id="gpu_list"></div>
 </div>
 <div class="card">
 <h3>转码进度</h3>
@@ -1161,7 +1271,16 @@ function renderDirs(){let L=el('dirs_list');L.innerHTML='';if(!monitorDirs.lengt
 function toggleResizeCustom(){el('custom_resize_wrap').style.display=(el('resize_mode').value==='custom')?'block':'none'}
 function toggleOutputDir(){el('output_dir_wrap').style.display=(el('output_mode').value==='custom_dir')?'block':'none'}
 function saveCfg(){let d={monitor_dirs:monitorDirs,crf:parseInt(el('crf').value),preset:el('preset').value,threads:parseInt(el('threads').value),codec:el('codec').value,container:el('container').value,use_gpu:el('use_gpu').checked,resize_mode:el('resize_mode').value,custom_resize:el('custom_resize').value,fps_mode:el('fps_mode').value,output_mode:el('output_mode').value,output_dir:el('output_dir').value};fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.success)alert('已保存');else alert('保存失败')}).catch(e=>alert('保存失败: '+e.message))}
-async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';el('fps_mode').value=s.config.fps_mode||'keep';el('output_mode').value=s.config.output_mode||'overwrite';el('output_dir').value=s.config.output_dir||'';toggleOutputDir();if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+async function refresh(){try{let s=await fetch('/api/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let b=el('badge');b.textContent=s.running?'运行中':'已停止';b.className='badge '+(s.running?'b-on':'b-off');if(s.config){el('monitor_dir').value=s.config.monitor_dir;el('crf').value=s.config.crf;el('preset').value=s.config.preset;el('threads').value=s.config.threads;el('codec').value=s.config.codec;el('container').value=s.config.container;el('use_gpu').checked=s.config.use_gpu!==false;el('resize_mode').value=s.config.resize_mode||'1080p';el('custom_resize').value=s.config.custom_resize||'';el('fps_mode').value=s.config.fps_mode||'keep';el('output_mode').value=s.config.output_mode||'overwrite';el('output_dir').value=s.config.output_dir||'';toggleOutputDir();if(s.config.monitor_dirs){let nd=(s.config.monitor_dirs||[]).filter(x=>x);if(nd.join('|')!==monitorDirs.join('|')){monitorDirs=nd;renderDirs()}}}toggleResizeCustom();let p=s.process||{};el('process_pid').textContent=p.pid||'-';el('process_uptime').textContent=p.uptime_seconds!=null?(p.uptime_seconds+' 秒'):'-';el('current_file').textContent=p.current_file||'-';el('current_activity').textContent=p.current_activity||'-';let pct=Math.max(0,Math.min(100,Number(p.progress_percent||0)));el('progress_fill').style.width=pct+'%';el('progress_text').textContent=pct.toFixed(1)+'%';el('last_error_text').textContent=s.error||p.last_error||'无';el('recent_log').textContent=(s.recent_log&&s.recent_log.length)?s.recent_log.join('\\n'):'暂无日志';
+let sys=s.system||{};
+let cpu=sys.cpu_percent;
+el('cpu_fill').style.width=(cpu==null?'0':Math.max(0,Math.min(100,cpu)))+'%';
+el('cpu_text').textContent=(cpu==null?'不可用':cpu.toFixed(1)+'%');
+let mem=sys.memory;
+if(mem){el('mem_fill').style.width=Math.max(0,Math.min(100,mem.percent))+'%';el('mem_text').textContent=mem.percent.toFixed(1)+'% ('+Math.round(mem.used_mb)+'/'+Math.round(mem.total_mb)+' MB)';}else{el('mem_fill').style.width='0';el('mem_text').textContent='不可用';}
+let gl=el('gpu_list');gl.innerHTML='';let gpus=sys.gpus||[];
+if(!gpus.length){let ni=document.createElement('div');ni.className='gpu-item';let nn=document.createElement('div');nn.className='gpu-name';let ns=document.createElement('span');ns.className='gstat';ns.textContent='未检测到 NVIDIA 独显（nvidia-smi 不可用）';nn.appendChild(ns);ni.appendChild(nn);gl.appendChild(ni);}
+gpus.forEach(g=>{let item=document.createElement('div');item.className='gpu-item';let name=document.createElement('div');name.className='gpu-name';let nm=document.createElement('span');nm.textContent=g.name||'GPU';let st=document.createElement('span');st.className='gstat';let tempStr=(g.temperature!=null)?g.temperature+'°C':'-';let memStr=(g.mem_used_mb!=null&&g.mem_total_mb!=null)?'显存 '+Math.round(g.mem_used_mb)+'/'+Math.round(g.mem_total_mb)+' MB':'显存 -';st.textContent=tempStr+' · '+memStr;name.appendChild(nm);name.appendChild(st);item.appendChild(name);let row=document.createElement('div');row.className='res-row';let lab=document.createElement('div');lab.className='res-label';lab.textContent='GPU';let bar=document.createElement('div');bar.className='pbar';let fill=document.createElement('div');fill.className='pfill';fill.style.background='linear-gradient(90deg,#8b5cf6,#ec4899)';let util=g.utilization_gpu;fill.style.width=(util==null?'0':Math.max(0,Math.min(100,util)))+'%';bar.appendChild(fill);let tx=document.createElement('div');tx.className='ptext';tx.textContent=(util==null?'-':util.toFixed(0)+'%');row.appendChild(lab);row.appendChild(bar);row.appendChild(tx);item.appendChild(row);gl.appendChild(item);});let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
 function toggleLogs(){let b=el('log_body');if(b)b.style.display=b.style.display==='none'?'':'none'}
 async function resetLogs(){if(!confirm('确定要清空所有转码记录吗？\\n\\n累计节省空间统计会保留，磁盘上的视频文件不会被删除。'))return;try{let r=await fetch('/api/logs/reset',{method:'POST'});let d=await r.json();if(d.success){alert('已清空 '+d.deleted_count+' 条记录，累计统计已保留');refresh()}else{alert(d.error||'重置失败')}}catch(e){alert('重置失败: '+e.message)}}
 function toggleAllLogs(master){document.querySelectorAll('.log_cb').forEach(c=>{c.checked=master.checked})}
