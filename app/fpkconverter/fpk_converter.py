@@ -335,6 +335,8 @@ class VideoConverter:
         self.task_status = {}
         self.task_lock = threading.Lock()
         self.state_file = self._resolve_state_file()
+        # 启动时清空上一次运行遗留的队列状态，避免界面显示陈旧任务
+        self._dump_task_status()
 
     # 分辨率预设 → 目标高度（等比缩放，宽度自动按 2 对齐）
     RESIZE_PRESETS = {
