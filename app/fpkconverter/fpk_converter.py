@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.70'
+VERSION = '1.0.71'
 
 
 class Database:
@@ -821,7 +821,7 @@ class VideoConverter:
             return str(self.temp_dir / 'queue_state.json')
         return os.path.join(os.getcwd(), 'queue_state.json')
 
-    def _update_task(self, filepath, status, progress=None, activity=None):
+    def _update_task(self, filepath, status, progress=None, activity=None, codec=None):
         fp = str(filepath)
         with self.task_lock:
             entry = self.task_status.get(fp) or {}
@@ -831,6 +831,8 @@ class VideoConverter:
                 entry['progress'] = round(max(0.0, min(100.0, float(progress))), 1)
             if activity is not None:
                 entry['activity'] = activity
+            if codec is not None:
+                entry['codec'] = codec
             entry['updated_at'] = time.time()
             self.task_status[fp] = entry
         self._dump_task_status()
@@ -1242,7 +1244,9 @@ class VideoConverter:
             target_codec = 'h264_qsv'
         else:
             target_codec = self.codec
-        
+        # 记录本任务实际选用的编码器，便于队列界面区分硬件加速 / CPU 软件编码
+        self._update_task(str(input_path), None, codec=target_codec)
+
         target_width, target_height = width, height
         needs_resize = False
         resize_mode = getattr(self, 'resize_mode', '1080p') or '1080p'
@@ -1346,6 +1350,7 @@ class VideoConverter:
                                                           color_info=color_info)
                     print(f"QSV 转码失败，自动降级 CPU 编码器重试: {fallback_codec}")
                     print(f"ffmpeg 降级命令: {' '.join(fallback_cmd)}")
+                    self._update_task(str(input_path), None, codec=fallback_codec, activity='硬件编码失败，已降级 CPU')
                     result = self._run_ffmpeg_cmd(fallback_cmd, ffmpeg_log, duration_seconds, str(input_path))
                     if result.returncode == 0:
                         cmd = fallback_cmd
