@@ -9,6 +9,7 @@ app/fpkconverter/packages/
 app/fpkconverter/boot.log
 app/fpkconverter/*.db
 app/fpkconverter/*.log
+app/fpkconverter/data/
 
 # 打包产物
 *.fpk
