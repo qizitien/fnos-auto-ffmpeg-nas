@@ -29,6 +29,7 @@ if os.path.isdir(PKG_DIR) and PKG_DIR not in sys.path:
 DB_PATH     = os.path.join(VAR_DIR, 'fpk_converter.db')
 CONFIG_PATH = os.path.join(VAR_DIR, 'config.json')
 CONV_LOG    = os.path.join(VAR_DIR, 'converter.log')
+QUEUE_STATE_PATH = os.path.join(VAR_DIR, 'queue_state.json')
 # 由 cmd/config_callback 把 TRIM_DATA_ACCESSIBLE_PATHS 写入此文件，
 # 让 web 进程在用户变更授权后无需重启即可感知。
 ACCESSIBLE_PATHS_FILE = os.path.join(VAR_DIR, 'accessible_paths')
@@ -548,6 +549,20 @@ def api_status():
                     'process':process, 'recent_log':lines, 'system':_system_stats(),
                     'authorized_roots': get_authorized_roots()})
 
+@app.route('/api/queue')
+def api_queue():
+    tasks = []
+    try:
+        if os.path.exists(QUEUE_STATE_PATH):
+            with open(QUEUE_STATE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            tasks = data.get('tasks') or []
+    except Exception:
+        tasks = []
+    order = {'queued': 0, 'processing': 1}
+    tasks.sort(key=lambda t: (order.get(t.get('status'), 9), -(t.get('updated_at') or 0)))
+    return jsonify({'tasks': tasks})
+
 TEMP_DIR = os.path.join(VAR_DIR, 'temp')
 
 @app.route('/api/start', methods=['POST'])
@@ -1060,6 +1075,17 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(1200px
 .gpu-item{margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
 .gpu-name{font-size:12px;margin-bottom:6px;display:flex;justify-content:space-between;gap:10px}
 .gpu-name .gstat{color:var(--mut);font-size:11px}
+.queue-item{padding:12px 0;border-bottom:1px solid var(--border)}
+.queue-item:last-child{border-bottom:none}
+.queue-top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:6px}
+.queue-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queue-path{font-size:11px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+.queue-badge{font-size:11px;padding:2px 10px;border-radius:10px;white-space:nowrap}
+.queue-badge.q{background:rgba(148,163,184,.18);color:var(--mut)}
+.queue-badge.p{background:rgba(56,189,248,.18);color:var(--acc)}
+.queue-mid{display:grid;grid-template-columns:1fr 76px;gap:10px;align-items:center}
+.queue-mid .pbar{margin-top:0}
+.queue-mid .ptext{margin-top:0;text-align:right}
 .logbox{background:#0a0c12;color:#a5b4cf;border-radius:10px;padding:12px;max-height:240px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;white-space:pre-wrap;border:1px solid var(--border)}
 .errbox{background:rgba(239,68,68,.08);color:#fca5a5;border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:10px 12px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow:auto}
 .errmsg{color:#fca5a5;font-size:12px;margin-top:8px;padding:8px 12px;background:rgba(239,68,68,.1);border-radius:8px;display:none}
@@ -1095,6 +1121,7 @@ input[type=checkbox]{width:auto}
 
 <div class="tabs">
 <button class="tab active" data-tab="dash" onclick="showTab('dash')">控制面板</button>
+<button class="tab" data-tab="queue" onclick="showTab('queue')">转码队列 <span class="cnt" id="queue_cnt" style="display:none">0</span></button>
 <button class="tab" data-tab="prob" onclick="showTab('prob')">问题文件 <span class="cnt" id="prob_cnt" style="display:none">0</span></button>
 <button class="tab" data-tab="log" onclick="showTab('log')">转码日志</button>
 <button class="tab" data-tab="cfg" onclick="showTab('cfg')">设置</button>
@@ -1140,6 +1167,13 @@ input[type=checkbox]{width:auto}
 <div class="card">
 <h3>最近输出日志</h3>
 <pre class="logbox" id="recent_log">暂无日志</pre>
+</div>
+</div>
+
+<div class="pane" id="pane-queue">
+<div class="card">
+<h3>转码队列 <span class="gstat" id="queue_summary">0 个任务</span></h3>
+<div id="queue_list"></div>
 </div>
 </div>
 
@@ -1263,6 +1297,8 @@ input[type=checkbox]{width:auto}
 <script>
 function showTab(name){document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active',p.id==='pane-'+name))}
 function el(id){return document.getElementById(id)}
+function basename(p){let s=String(p||'').replace(/\\/g,'/');let i=s.lastIndexOf('/');return i>=0?s.slice(i+1):s}
+async function loadQueue(){try{let d=await fetch('/api/queue').then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});let tasks=d.tasks||[];let list=el('queue_list');list.innerHTML='';let qc=el('queue_cnt');let sum=el('queue_summary');let proc=tasks.filter(t=>t.status==='processing').length;let que=tasks.filter(t=>t.status==='queued').length;if(qc){qc.style.display=tasks.length?'':'none';qc.textContent=tasks.length}if(sum){sum.textContent=tasks.length?('排队 '+que+' · 转码中 '+proc):'队列为空'}if(!tasks.length){let e=document.createElement('div');e.className='gstat';e.textContent='当前没有排队或正在转码的任务';list.appendChild(e);return}tasks.forEach(t=>{let item=document.createElement('div');item.className='queue-item';let top=document.createElement('div');top.className='queue-top';let left=document.createElement('div');left.style.minWidth='0';let name=document.createElement('div');name.className='queue-name';name.textContent=basename(t.path);let path=document.createElement('div');path.className='queue-path';path.textContent=t.path;left.appendChild(name);left.appendChild(path);top.appendChild(left);let badge=document.createElement('span');badge.className='queue-badge '+(t.status==='processing'?'p':'q');badge.textContent=t.status==='processing'?'转码中':'排队中';top.appendChild(badge);item.appendChild(top);let mid=document.createElement('div');mid.className='queue-mid';let bar=document.createElement('div');bar.className='pbar';let fill=document.createElement('div');fill.className='pfill';let p=Math.max(0,Math.min(100,Number(t.progress||0)));fill.style.width=p+'%';bar.appendChild(fill);let tx=document.createElement('div');tx.className='ptext';tx.textContent=p.toFixed(1)+'%';mid.appendChild(bar);mid.appendChild(tx);item.appendChild(mid);let act=document.createElement('div');act.className='queue-path';act.textContent=t.activity||'';item.appendChild(act);list.appendChild(item)})}catch(e){console.error('queue load error:',e)}}
 function api(a){fetch('/api/'+a,{method:'POST'}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}).then(d=>{if(d.error){el('errmsg').textContent=d.error;el('errmsg').style.display='block'}else{el('errmsg').style.display='none'}refresh()}).catch(e=>{el('errmsg').textContent='请求失败: '+e.message;el('errmsg').style.display='block'})}
 var monitorDirs=({{config.monitor_dirs|tojson}}||[]);
 function addDir(){let v=(el('monitor_dir').value||'').trim();if(!v){alert('请输入目录路径');return}v=v.replace(/\\/+$/,'');if(monitorDirs.indexOf(v)<0){monitorDirs.push(v);renderDirs();saveCfg()}else{alert('该目录已在列表中')}}
@@ -1295,7 +1331,7 @@ async function batchDeleteProblems(){let fps=[];document.querySelectorAll('.prob
 function probRecheck(fp){fetch('/api/problems/recheck',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('已从问题列表移除');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
 function rescanAllProblems(){if(!confirm('将清空所有问题文件记录，让下一轮扫描（最多 60 秒内）重新检测这些失败文件。\\n\\n不会删除物理文件，只是让它们重新尝试转码。\\n\\n确定继续吗？'))return;fetch('/api/problems/rescan_all',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.success){alert('已清空问题列表，将在下一轮扫描时重新检测 '+d.cleared+' 个文件');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
 function probDelete(fp){if(!confirm('确定要永久删除该文件吗？\\n\\n'+fp+'\\n\\n此操作不可恢复！'))return;fetch('/api/problems/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('文件已删除');loadProblems()}else{alert(d.error||'删除失败')}}).catch(e=>alert('删除失败: '+e.message))}
-renderDirs();toggleResizeCustom();refresh();setInterval(refresh,5000);loadProblems()</script>
+renderDirs();toggleResizeCustom();refresh();setInterval(refresh,5000);loadQueue();setInterval(loadQueue,5000);loadProblems()</script>
 </body></html>'''
 
 if __name__ == '__main__':

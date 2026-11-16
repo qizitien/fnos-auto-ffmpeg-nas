@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.67'
+VERSION = '1.0.68'
 
 
 class Database:
@@ -331,6 +331,10 @@ class VideoConverter:
         self.output_dir = ''
         # 监控根目录列表（用于 custom_dir 模式计算相对路径）
         self.monitor_dirs = []
+        # 任务状态表：filepath -> {status, progress, activity, updated_at}，供 Web 界面队列展示
+        self.task_status = {}
+        self.task_lock = threading.Lock()
+        self.state_file = self._resolve_state_file()
 
     # 分辨率预设 → 目标高度（等比缩放，宽度自动按 2 对齐）
     RESIZE_PRESETS = {
@@ -797,8 +801,54 @@ class VideoConverter:
                     return
             self._queue.append({'path': filepath_str, 'queued_at': time.time()})
             print(f"文件加入串行队列({len(self._queue)}): {filepath_str}")
+        self._update_task(filepath_str, 'queued', progress=0, activity='等待转码')
         
         self._ensure_worker()
+
+    def _resolve_state_file(self):
+        try:
+            dbp = getattr(self.db, 'db_path', None)
+            if dbp:
+                return os.path.join(os.path.dirname(os.path.abspath(dbp)), 'queue_state.json')
+        except Exception:
+            pass
+        if self.temp_dir:
+            return str(self.temp_dir / 'queue_state.json')
+        return os.path.join(os.getcwd(), 'queue_state.json')
+
+    def _update_task(self, filepath, status, progress=None, activity=None):
+        fp = str(filepath)
+        with self.task_lock:
+            entry = self.task_status.get(fp) or {}
+            if status is not None:
+                entry['status'] = status
+            if progress is not None:
+                entry['progress'] = round(max(0.0, min(100.0, float(progress))), 1)
+            if activity is not None:
+                entry['activity'] = activity
+            entry['updated_at'] = time.time()
+            self.task_status[fp] = entry
+        self._dump_task_status()
+
+    def _remove_task(self, filepath):
+        fp = str(filepath)
+        with self.task_lock:
+            if fp in self.task_status:
+                del self.task_status[fp]
+        self._dump_task_status()
+
+    def _dump_task_status(self):
+        if not self.state_file:
+            return
+        try:
+            with self.task_lock:
+                snap = [{'path': k, **v} for k, v in self.task_status.items()]
+            tmp = self.state_file + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'tasks': snap}, f, ensure_ascii=False)
+            os.replace(tmp, self.state_file)
+        except Exception as e:
+            print(f"写入队列状态文件失败: {e}")
 
     def _ensure_worker(self):
         target = max(1, int(getattr(self, 'concurrent_tasks', self.MAX_CONCURRENT_TASKS) or self.MAX_CONCURRENT_TASKS))
@@ -862,6 +912,7 @@ class VideoConverter:
                 self._cleanup_transcode_logs()
                 
                 print(f"[SERIAL] 开始处理: {filepath_str}")
+                self._update_task(filepath_str, 'processing', progress=0, activity='开始转码')
                 success, _ = self.convert_video(filepath)
                 if success:
                     self._clear_failure_retry(filepath_str)
@@ -874,7 +925,8 @@ class VideoConverter:
             finally:
                 with self._queue_lock:
                     self._active_paths.discard(filepath_str)
-            
+                self._remove_task(filepath_str)
+
             time.sleep(2)
 
     def _enforce_temp_limit(self):
@@ -1079,6 +1131,8 @@ class VideoConverter:
                     now = time.time()
                     if now - last_progress_log >= 5 or percent >= 99:
                         print(f"转码进度: {percent:.1f}% | 当前文件: {source_path}")
+                        if source_path:
+                            self._update_task(source_path, 'processing', progress=percent, activity='转码中')
                         last_progress_log = now
                 try:
                     returncode = proc.wait(timeout=3600)
