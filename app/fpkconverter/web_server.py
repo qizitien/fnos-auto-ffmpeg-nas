@@ -817,6 +817,40 @@ def api_logs_batch_delete():
         return jsonify({'success': False, 'error': f'数据库错误: {e}'}), 500
     return jsonify({'success': True, 'deleted_count': deleted})
 
+@app.route('/api/logs/retry', methods=['POST'])
+def api_logs_retry():
+    """把失败记录重新加入转码：清除其失败日志行与问题表标记，下一轮扫描自动重新入队重转。
+    只动 success=0 的失败记录，已成功记录不删；路径仍走授权目录白名单校验。"""
+    _ensure_problem_schema()
+    data = request.get_json(silent=True) or {}
+    fps = data.get('filepaths')
+    single = (data.get('filepath') or '').strip()
+    if isinstance(fps, list):
+        fps = [str(x).strip() for x in fps if str(x).strip()]
+    elif single:
+        fps = [single]
+    else:
+        return jsonify({'success': False, 'error': '未选择任何文件'}), 400
+
+    retried, skipped = [], []
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        try:
+            for fp in fps:
+                if not fp or _is_blocked_system_path(fp) or not _is_under_authorized_root(fp):
+                    skipped.append(fp); continue
+                if not os.path.exists(fp):
+                    skipped.append(fp); continue
+                db.execute('DELETE FROM processed_files WHERE filepath = ? AND success = 0', (fp,))
+                db.execute('DELETE FROM problem_files WHERE filepath = ?', (fp,))
+                retried.append(fp)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'数据库错误: {e}'}), 500
+    return jsonify({'success': True, 'retried': len(retried), 'skipped': len(skipped), 'filepaths': retried})
+
 @app.route('/api/problems')
 def api_problems():
     _ensure_problem_schema()
@@ -1218,6 +1252,8 @@ input[type=checkbox]{width:auto}
 <button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="toggleLogs()">折叠/展开</button>
 <button class="btn b-ghost" style="padding:5px 12px;font-size:11px" onclick="refresh()">刷新</button>
 <button class="btn b-err" style="padding:5px 12px;font-size:11px" onclick="batchDeleteLogs()">批量删除选中</button>
+<label style="font-size:11px;display:flex;align-items:center;gap:4px;color:#cbd5e1"><input type="checkbox" id="log_fail_only" onchange="refresh()">仅看失败</label>
+<button class="btn b-acc" style="padding:5px 12px;font-size:11px" onclick="retryAllFailed()">重转失败</button>
 <button class="btn b-acc" style="padding:5px 12px;font-size:11px" onclick="resetLogs()">重置（清空记录，保留统计）</button>
 </div></h3>
 <div id="log_body" class="tc"><table><thead><tr>
@@ -1323,7 +1359,7 @@ let mem=sys.memory;
 if(mem){el('mem_fill').style.width=Math.max(0,Math.min(100,mem.percent))+'%';el('mem_text').textContent=mem.percent.toFixed(1)+'% ('+Math.round(mem.used_mb)+'/'+Math.round(mem.total_mb)+' MB)';}else{el('mem_fill').style.width='0';el('mem_text').textContent='不可用';}
 let gl=el('gpu_list');gl.innerHTML='';let gpus=sys.gpus||[];
 if(!gpus.length){let ni=document.createElement('div');ni.className='gpu-item';let nn=document.createElement('div');nn.className='gpu-name';let ns=document.createElement('span');ns.className='gstat';ns.textContent='未检测到 NVIDIA 独显（nvidia-smi 不可用）';nn.appendChild(ns);ni.appendChild(nn);gl.appendChild(ni);}
-gpus.forEach(g=>{let item=document.createElement('div');item.className='gpu-item';let name=document.createElement('div');name.className='gpu-name';let nm=document.createElement('span');nm.textContent=g.name||'GPU';let st=document.createElement('span');st.className='gstat';let tempStr=(g.temperature!=null)?g.temperature+'°C':'-';let memStr=(g.mem_used_mb!=null&&g.mem_total_mb!=null)?'显存 '+Math.round(g.mem_used_mb)+'/'+Math.round(g.mem_total_mb)+' MB':'显存 -';let encStr=(g.utilization_encoder!=null)?('编码 '+g.utilization_encoder.toFixed(0)+'%'):'编码 -';let decStr=(g.utilization_decoder!=null)?('解码 '+g.utilization_decoder.toFixed(0)+'%'):'解码 -';st.textContent=tempStr+' · '+memStr+' · '+encStr+' · '+decStr;name.appendChild(nm);name.appendChild(st);item.appendChild(name);let row=document.createElement('div');row.className='res-row';let lab=document.createElement('div');lab.className='res-label';lab.textContent='GPU';let bar=document.createElement('div');bar.className='pbar';let fill=document.createElement('div');fill.className='pfill';fill.style.background='linear-gradient(90deg,#8b5cf6,#ec4899)';let util=g.utilization_gpu;fill.style.width=(util==null?'0':Math.max(0,Math.min(100,util)))+'%';bar.appendChild(fill);let tx=document.createElement('div');tx.className='ptext';tx.textContent=(util==null?'-':util.toFixed(0)+'%');row.appendChild(lab);row.appendChild(bar);row.appendChild(tx);item.appendChild(row);gl.appendChild(item);});let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;l.logs.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);let tdOp=document.createElement('td');let pb=document.createElement('button');pb.textContent='复制路径';pb.className='btn b-ghost';pb.style.cssText='padding:3px 10px;font-size:11px';pb.onclick=()=>copyPath(r.filepath);tdOp.appendChild(pb);tr.appendChild(tdOp);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
+gpus.forEach(g=>{let item=document.createElement('div');item.className='gpu-item';let name=document.createElement('div');name.className='gpu-name';let nm=document.createElement('span');nm.textContent=g.name||'GPU';let st=document.createElement('span');st.className='gstat';let tempStr=(g.temperature!=null)?g.temperature+'°C':'-';let memStr=(g.mem_used_mb!=null&&g.mem_total_mb!=null)?'显存 '+Math.round(g.mem_used_mb)+'/'+Math.round(g.mem_total_mb)+' MB':'显存 -';let encStr=(g.utilization_encoder!=null)?('编码 '+g.utilization_encoder.toFixed(0)+'%'):'编码 -';let decStr=(g.utilization_decoder!=null)?('解码 '+g.utilization_decoder.toFixed(0)+'%'):'解码 -';st.textContent=tempStr+' · '+memStr+' · '+encStr+' · '+decStr;name.appendChild(nm);name.appendChild(st);item.appendChild(name);let row=document.createElement('div');row.className='res-row';let lab=document.createElement('div');lab.className='res-label';lab.textContent='GPU';let bar=document.createElement('div');bar.className='pbar';let fill=document.createElement('div');fill.className='pfill';fill.style.background='linear-gradient(90deg,#8b5cf6,#ec4899)';let util=g.utilization_gpu;fill.style.width=(util==null?'0':Math.max(0,Math.min(100,util)))+'%';bar.appendChild(fill);let tx=document.createElement('div');tx.className='ptext';tx.textContent=(util==null?'-':util.toFixed(0)+'%');row.appendChild(lab);row.appendChild(bar);row.appendChild(tx);item.appendChild(row);gl.appendChild(item);});let l=await fetch('/api/logs?limit='+(el('log_limit')?el('log_limit').value:100)).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()});el('ts').textContent=l.total_saved_mb;el('tc2').textContent=l.total_count!=null?l.total_count:l.logs.length;let failOnly=el('log_fail_only')&&el('log_fail_only').checked;let rows=failOnly?l.logs.filter(x=>!x.success):l.logs;window.__failedLogs=l.logs.filter(x=>!x.success).map(x=>x.filepath);let t=el('tb');t.innerHTML='';if(el('log_select_all'))el('log_select_all').checked=false;rows.forEach(r=>{let tr=document.createElement('tr');let td0=document.createElement('td');let cb=document.createElement('input');cb.type='checkbox';cb.className='log_cb';cb.value=r.id;td0.appendChild(cb);tr.appendChild(td0);['filepath','file_size_mb','saved_size_mb'].forEach(k=>{let td=document.createElement('td');td.textContent=r[k];tr.appendChild(td)});let sd=document.createElement('td');sd.textContent=r.success?'成功':'失败';sd.className=r.success?'suc':'err';tr.appendChild(sd);let td=document.createElement('td');td.textContent=r.processed_at;tr.appendChild(td);let tdOp=document.createElement('td');let pb=document.createElement('button');pb.textContent='复制路径';pb.className='btn b-ghost';pb.style.cssText='padding:3px 10px;font-size:11px';pb.onclick=()=>copyPath(r.filepath);tdOp.appendChild(pb);if(!r.success){let rb=document.createElement('button');rb.textContent='重转';rb.className='btn b-acc';rb.style.cssText='padding:3px 10px;font-size:11px;margin-left:6px';rb.onclick=()=>retryLogs([r.filepath]);tdOp.appendChild(rb)}tr.appendChild(tdOp);t.appendChild(tr)})}catch(e){console.error('refresh error:',e)}}
 function toggleLogs(){let b=el('log_body');if(b)b.style.display=b.style.display==='none'?'':'none'}
 async function resetLogs(){if(!confirm('确定要清空所有转码记录吗？\\n\\n累计节省空间统计会保留，磁盘上的视频文件不会被删除。'))return;try{let r=await fetch('/api/logs/reset',{method:'POST'});let d=await r.json();if(d.success){alert('已清空 '+d.deleted_count+' 条记录，累计统计已保留');refresh()}else{alert(d.error||'重置失败')}}catch(e){alert('重置失败: '+e.message)}}
 function toggleAllLogs(master){document.querySelectorAll('.log_cb').forEach(c=>{c.checked=master.checked})}
@@ -1336,6 +1372,8 @@ async function loadProblems(){try{let d=await fetch('/api/problems').then(r=>{if
 function toggleAllProblems(master){document.querySelectorAll('.prob_cb').forEach(c=>{c.checked=master.checked})}
 async function batchDeleteProblems(){let fps=[];document.querySelectorAll('.prob_cb').forEach(c=>{if(c.checked)fps.push(c.value)});if(!fps.length){alert('请先勾选要删除的问题文件');return}if(!confirm('确定要永久删除选中的 '+fps.length+' 个文件吗？\\n\\n此操作不可恢复！'))return;try{let r=await fetch('/api/problems/batch_delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepaths:fps})});let d=await r.json();if(d.success){let msg='已删除 '+d.deleted_count+' 个文件';if(d.skipped&&d.skipped.length)msg+='\\n跳过 '+d.skipped.length+' 个';if(d.errors&&d.errors.length)msg+='\\n失败 '+d.errors.length+' 个';alert(msg);loadProblems()}else{alert(d.error||'批量删除失败')}}catch(e){alert('批量删除失败: '+e.message)}}
 function copyPath(fp){if(!fp)return;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(fp).then(()=>alert('路径已复制:\\n'+fp)).catch(()=>{prompt('手动复制该路径:',fp)})}else{prompt('手动复制该路径:',fp)}}
+async function retryLogs(fps){if(!fps||!fps.length){alert('没有可重转的文件');return}if(!confirm('确定把选中的 '+fps.length+' 个失败文件重新加入队列转码吗？\\n下一轮扫描会自动重新处理这些文件。'))return;try{let r=await fetch('/api/logs/retry',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepaths:fps})});let d=await r.json();if(d.success){alert('已重新加入队列: '+d.retried+' 个'+(d.skipped?'，跳过 '+d.skipped+' 个':''));refresh()}else{alert(d.error||'重转失败')}}catch(e){alert('重转失败: '+e.message)}}
+function retryAllFailed(){let fps=(window.__failedLogs||[]).slice();if(!fps.length){alert('当前没有失败记录');return}retryLogs(fps)}
 function probRecheck(fp){fetch('/api/problems/recheck',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('已从问题列表移除');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
 function rescanAllProblems(){if(!confirm('将清空所有问题文件记录，让下一轮扫描（最多 60 秒内）重新检测这些失败文件。\\n\\n不会删除物理文件，只是让它们重新尝试转码。\\n\\n确定继续吗？'))return;fetch('/api/problems/rescan_all',{method:'POST'}).then(r=>r.json()).then(d=>{if(d.success){alert('已清空问题列表，将在下一轮扫描时重新检测 '+d.cleared+' 个文件');loadProblems()}else{alert(d.error||'操作失败')}}).catch(e=>alert('操作失败: '+e.message))}
 function probDelete(fp){if(!confirm('确定要永久删除该文件吗？\\n\\n'+fp+'\\n\\n此操作不可恢复！'))return;fetch('/api/problems/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filepath:fp})}).then(r=>r.json()).then(d=>{if(d.success){alert('文件已删除');loadProblems()}else{alert(d.error||'删除失败')}}).catch(e=>alert('删除失败: '+e.message))}
