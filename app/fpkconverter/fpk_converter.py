@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.75'
+VERSION = '1.0.76'
 
 
 class Database:
@@ -1127,9 +1127,11 @@ class VideoConverter:
             if value and value != 'unknown':
                 cmd.extend([arg, str(value)])
 
-        cmd.extend(['-c:a', 'copy'])
         if self.container == 'mp4':
-            cmd.extend(['-movflags', '+faststart'])
+            # MP4 容器不认 cook 等专有音频编码，直接 copy 会写头失败；统一转 AAC 兜底。
+            cmd.extend(['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart'])
+        else:
+            cmd.extend(['-c:a', 'copy'])
         cmd.extend(['-y', str(output_path)])
         return cmd
 
