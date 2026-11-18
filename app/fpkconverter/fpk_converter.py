@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.76'
+VERSION = '1.0.77'
 
 
 class Database:
@@ -292,6 +292,8 @@ class VideoConverter:
     # 最大并发转码任务数：与 Tesla P4 的 2 个 NVENC 编码单元对齐，2 路并行正好吃满显卡；
     # 队列不足时不会强行起满。
     MAX_CONCURRENT_TASKS = 2
+    # P4 NVDEC 可硬解的视频编码；其余（如 rv40/rmvb/wmv 等老 Real/私有编码）只能 CPU 软解。
+    HWACCEL_DECODE_CODECS = {'h264', 'hevc', 'mpeg2video', 'mpeg4', 'vc1', 'vp9', 'mjpeg'}
     FAILURE_RETRY_DELAYS = (1800, 7200, 21600)  # 30分钟、2小时、6小时
     MAX_FAILURE_RETRIES = 3
     TEMP_LOG_MAX_KEEP = 50
@@ -1062,7 +1064,7 @@ class VideoConverter:
         return out_root / f"{inp.stem}.{self.container}"
 
     def _build_ffmpeg_cmd(self, input_path, output_path, target_codec, target_width, target_height, needs_resize,
-                          preset_override=None, progress=False, qsv_device=None, color_info=None):
+                          preset_override=None, progress=False, qsv_device=None, color_info=None, source_codec=None):
         is_qsv = target_codec.endswith('_qsv')
         is_nvenc = target_codec.endswith('_nvenc')
         custom_scale = getattr(self, 'resize_mode', '') == 'custom' and bool(self.custom_resize)
@@ -1071,9 +1073,8 @@ class VideoConverter:
             cmd.extend(['-qsv_device', qsv_device])
         if progress:
             cmd.extend(['-progress', 'pipe:1'])
-        if is_nvenc:
-            # GPU 硬解码（帧回系统内存，缩放/上传走通用滤镜）；不开 cuda 帧输出与 scale_cuda，
-            # 避免自带 ffmpeg 未编译 CUDA 滤镜导致命令直接失败回退 CPU。
+        if is_nvenc and source_codec in self.HWACCEL_DECODE_CODECS:
+            # 仅对 NVDEC 支持的编码挂 CUDA 硬解；不支持的编码交 CPU 软解，避免无效 hwaccel 尝试。
             cmd.extend(['-hwaccel', 'cuda'])
         cmd.extend(['-i', str(input_path)])
         cmd.extend(['-c:v', target_codec])
@@ -1167,7 +1168,7 @@ class VideoConverter:
                     if now - last_progress_log >= 5 or percent >= 99:
                         print(f"转码进度: {percent:.1f}% | 当前文件: {source_path}")
                         if source_path:
-                            self._update_task(source_path, 'processing', progress=percent, activity='转码中')
+                            self._update_task(source_path, 'processing', progress=percent)
                         last_progress_log = now
                 try:
                     returncode = proc.wait(timeout=3600)
@@ -1256,7 +1257,10 @@ class VideoConverter:
         else:
             target_codec = self.codec
         # 记录本任务实际选用的编码器，便于队列界面区分硬件加速 / CPU 软件编码
-        self._update_task(str(input_path), None, codec=target_codec)
+        hw_decoded = codec in self.HWACCEL_DECODE_CODECS
+        decode_note = 'GPU 硬解' if hw_decoded else f'CPU 软解（{codec} 不支持硬解）'
+        print(f"解码方式: {decode_note}")
+        self._update_task(str(input_path), None, codec=target_codec, activity=decode_note)
 
         target_width, target_height = width, height
         needs_resize = False
@@ -1316,7 +1320,8 @@ class VideoConverter:
             result = None
             for attempt_index, qsv_device in enumerate(qsv_attempt_devices, 1):
                 cmd = self._build_ffmpeg_cmd(input_path, output_path, target_codec, target_width, target_height, needs_resize,
-                                             progress=duration_seconds > 0, qsv_device=qsv_device, color_info=color_info)
+                                             progress=duration_seconds > 0, qsv_device=qsv_device, color_info=color_info,
+                                             source_codec=codec)
                 if qsv_device:
                     print(f"QSV 尝试 {attempt_index}/{len(qsv_attempt_devices)}: 使用设备 {qsv_device}")
                 print(f"ffmpeg 命令: {' '.join(cmd)}")
@@ -1358,7 +1363,7 @@ class VideoConverter:
                         except: pass
                     fallback_cmd = self._build_ffmpeg_cmd(input_path, output_path, fallback_codec, target_width, target_height, needs_resize,
                                                           preset_override='medium', progress=duration_seconds > 0,
-                                                          color_info=color_info)
+                                                          color_info=color_info, source_codec=codec)
                     print(f"硬件编码器 {target_codec} 转码失败，自动降级 CPU 编码器重试: {fallback_codec}")
                     print(f"ffmpeg 降级命令: {' '.join(fallback_cmd)}")
                     self._update_task(str(input_path), None, codec=fallback_codec, activity='硬件编码失败，已降级 CPU')
