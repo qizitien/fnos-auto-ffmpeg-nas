@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-VERSION = '1.0.78'
+VERSION = '1.0.79'
 
 
 class Database:
@@ -1124,9 +1124,14 @@ class VideoConverter:
             ('pix_fmt', '-pix_fmt'),
         )
         for key, arg in color_arg_map:
+            if key == 'pix_fmt' and is_nvenc:
+                # NVENC 不接受 10bit/yuv444 等源像素格式，强制转 8-bit yuv420p，不透传源 pix_fmt
+                continue
             value = color_info.get(key)
             if value and value != 'unknown':
                 cmd.extend([arg, str(value)])
+        if is_nvenc:
+            cmd.extend(['-pix_fmt', 'yuv420p'])
 
         if self.container == 'mp4':
             # MP4 容器不认 cook 等专有音频编码，直接 copy 会写头失败；统一转 AAC 兜底。
@@ -1135,6 +1140,23 @@ class VideoConverter:
             cmd.extend(['-c:a', 'copy'])
         cmd.extend(['-y', str(output_path)])
         return cmd
+
+    @staticmethod
+    def _ffmpeg_error_summary(text):
+        """从 ffmpeg 日志末尾提取最能说明问题的一行错误摘要，去掉库前缀地址。"""
+        if not text:
+            return 'Unknown error'
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            return 'Unknown error'
+        keys = ('error', 'invalid', 'unsupported', 'unable', 'failed', 'cannot',
+                'not supported', 'no such', 'permission', 'denied', 'not enough')
+        for l in reversed(lines):
+            low = l.lower()
+            if any(k in low for k in keys):
+                l = re.sub(r'^\[[^\]]*\]\s*', '', l)
+                return l[:160]
+        return re.sub(r'^\[[^\]]*\]\s*', '', lines[-1])[:160]
 
     def _cpu_fallback_codec(self, target_codec):
         if target_codec in ('h264_qsv', 'h264_nvenc'):
@@ -1341,11 +1363,12 @@ class VideoConverter:
                 break
 
             if result.returncode != 0:
-                self._last_failure_reason = '转码失败（ffmpeg 报错，详见 var/temp/ffmpeg_*.log）'
                 err_msg = 'Unknown error'
                 if ffmpeg_log.exists():
                     try: err_msg = ffmpeg_log.read_text()[-1000:]
                     except: pass
+                summary = self._ffmpeg_error_summary(err_msg)
+                self._last_failure_reason = f'转码失败: {summary}'
                 print(f"FFmpeg 错误 (返回码 {result.returncode}): {err_msg}")
                 if self.use_gpu and target_codec.endswith('_qsv'):
                     print("GPU 转码失败：已勾选 GPU 加速，按设置不进行 CPU 降级，停止当前文件")
